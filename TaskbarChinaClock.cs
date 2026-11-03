@@ -691,10 +691,17 @@ namespace ChinaClock
     {
         private const int HWND_TOPMOST = -1;
         private const int SWP_NOSIZE = 1, SWP_NOMOVE = 2, SWP_NOACTIVATE = 0x10;
+        private const int EVENT_SYSTEM_FOREGROUND = 0x0003; // 前台窗口切换
+        private const int EVENT_OBJECT_REORDER = 0x8004;    // 窗口 Z 序变化
+        private const int WINEVENT_OUTOFCONTEXT = 0x0;
 
         [DllImport("user32.dll")] private static extern IntPtr FindWindow(string cls, string title);
         [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr h, out RECT r);
         [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr h, int after, int x, int y, int cx, int cy, int flags);
+
+        private delegate void WinEventDelegate(IntPtr hHook, int evt, IntPtr hwnd, int idObject, int idChild, int dwEventThread, int dwmsEventTime);
+        [DllImport("user32.dll")] private static extern IntPtr SetWinEventHook(int eventMin, int eventMax, IntPtr hmodWinEventProc, WinEventDelegate lpfnWinEventProc, int idProcess, int idThread, int dwFlags);
+        [DllImport("user32.dll")] private static extern bool UnhookWinEvent(IntPtr hWinEventHook);
 
         [StructLayout(LayoutKind.Sequential)]
         private struct RECT { public int Left, Top, Right, Bottom; }
@@ -720,7 +727,11 @@ namespace ChinaClock
         private int _fontH = -1;
         private DateTime _lastToggle = DateTime.MinValue;
         private DateTime _panelClosedAt = DateTime.MinValue;
+        private DateTime _lastAssert = DateTime.MinValue;
         private CalendarPanel _panel;
+        private WinEventDelegate _hookProc;  // 保持引用防 GC 回收，否则钩子会失效
+        private IntPtr _hookFore = IntPtr.Zero, _hookReorder = IntPtr.Zero;
+        private IntPtr _trayHwnd = IntPtr.Zero;
         private readonly bool _openPanel;
 
         public ClockForm(bool openPanel)
@@ -772,6 +783,29 @@ namespace ChinaClock
                 if (r.IsEmpty || !IsHandleCreated) return;
                 BeginInvoke((MethodInvoker)delegate { FitToNativeClock(r); });
             });
+
+            // 点击任务栏时 Windows 会把任务栏窗口顶到置顶层最前，盖住本时钟（原生时钟
+            // 露出，要等定位定时器 4 秒后才能顶回来）。挂系统事件钩子，前台切换或任务
+            // 栏 Z 序变化一到就立刻顶回最上层，让原生时钟来不及露出来。
+            _trayHwnd = FindWindow("Shell_TrayWnd", null);
+            _hookProc = WinEventProc;
+            _hookFore = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, IntPtr.Zero, _hookProc, 0, 0, WINEVENT_OUTOFCONTEXT);
+            _hookReorder = SetWinEventHook(EVENT_OBJECT_REORDER, EVENT_OBJECT_REORDER, IntPtr.Zero, _hookProc, 0, 0, WINEVENT_OUTOFCONTEXT);
+        }
+
+        private void WinEventProc(IntPtr hHook, int evt, IntPtr hwnd, int idObject, int idChild, int dwEventThread, int dwmsEventTime)
+        {
+            // 前台切换（点任务栏、开关托盘浮层都会触发）或任务栏自身 Z 序变化
+            if (evt != EVENT_SYSTEM_FOREGROUND && hwnd != _trayHwnd) return;
+            AssertTopmost();
+        }
+
+        private void AssertTopmost()
+        {
+            if (!IsHandleCreated) return;
+            if ((DateTime.Now - _lastAssert).TotalMilliseconds < 150) return; // 事件风暴节流
+            _lastAssert = DateTime.Now;
+            SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
 
         protected override void OnShown(EventArgs e)
@@ -812,6 +846,7 @@ namespace ChinaClock
         {
             IntPtr tray = FindWindow("Shell_TrayWnd", null);
             if (tray == IntPtr.Zero) return;
+            _trayHwnd = tray;
             RECT tr;
             GetWindowRect(tray, out tr);
             _trayRect = Rectangle.FromLTRB(tr.Left, tr.Top, tr.Right, tr.Bottom);
@@ -1109,6 +1144,9 @@ namespace ChinaClock
             _uiTimer.Stop();
             _fitTimer.Stop();
             _bgTimer.Stop();
+            if (_hookFore != IntPtr.Zero) UnhookWinEvent(_hookFore);
+            if (_hookReorder != IntPtr.Zero) UnhookWinEvent(_hookReorder);
+            _hookProc = null;
             if (_panel != null && !_panel.IsDisposed) _panel.Close();
             if (_f1 != null) _f1.Dispose();
             if (_f2 != null) _f2.Dispose();
