@@ -113,6 +113,16 @@ namespace ChinaClock
             Check(lines, ref fails, "非法定 2026-10-08 无休标记", !CalendarData.IsStatutoryRest(new DateTime(2026, 10, 8)), "");
             Check(lines, ref fails, "角标 2026-10-01 = 休", CalendarData.Get(new DateTime(2026, 10, 1)).Badge == "休",
                 CalendarData.Get(new DateTime(2026, 10, 1)).Badge ?? "(null)");
+            Check(lines, ref fails, "普通工作日无角标 2026-11-03", CalendarData.Get(new DateTime(2026, 11, 3)).Badge == null,
+                CalendarData.Get(new DateTime(2026, 11, 3)).Badge ?? "(null)");
+            Check(lines, ref fails, "周末默认休 2026-11-07(周六)", CalendarData.Get(new DateTime(2026, 11, 7)).Badge == "休",
+                CalendarData.Get(new DateTime(2026, 11, 7)).Badge ?? "(null)");
+            Check(lines, ref fails, "未公布年份无法定角标 2027-02-05(除夕,周五)", CalendarData.Get(new DateTime(2027, 2, 5)).Badge == null,
+                CalendarData.Get(new DateTime(2027, 2, 5)).Badge ?? "(null)");
+            Check(lines, ref fails, "未公布年份无法定角标 2027-02-08(初三,周一)", CalendarData.Get(new DateTime(2027, 2, 8)).Badge == null,
+                CalendarData.Get(new DateTime(2027, 2, 8)).Badge ?? "(null)");
+            Check(lines, ref fails, "未公布年份周末仍休 2027-02-06(春节,周六)", CalendarData.Get(new DateTime(2027, 2, 6)).Badge == "休",
+                CalendarData.Get(new DateTime(2027, 2, 6)).Badge ?? "(null)");
 
             lines.Add("");
             lines.Add(fails == 0 ? "RESULT: ALL PASS (" + lines.Count + " checks)" : "RESULT: " + fails + " FAILURES");
@@ -191,7 +201,9 @@ namespace ChinaClock
             di.GanZhiMonth = GanZhiMonthName(d);
 
             string ov = OverrideFor(d);
-            di.Badge = ov ?? (di.StatutoryRest ? "休" : null);
+            // 角标优先级：holidays.txt 配置 > 法定假日 > 普通周末（周末也是休息日）
+            bool weekend = d.DayOfWeek == DayOfWeek.Saturday || d.DayOfWeek == DayOfWeek.Sunday;
+            di.Badge = ov ?? (di.StatutoryRest || weekend ? "休" : null);
             return di;
         }
 
@@ -338,8 +350,15 @@ namespace ChinaClock
         // ---- 法定假日（固定 13 天，不包含每年宣布的调休；调休请用 holidays.txt）----
         // 依据 2025 年起施行的放假办法：元旦1、春节4(除夕+初一~初三)、清明1、
         // 劳动节2(5.1~5.2)、端午1、中秋1、国庆3。
+        // 只对"已公布安排"的年份自动标注：次年安排由国务院在前一年底发布，
+        // 未公布年份（如明年）不预测——农历能算出春节是哪天，但除夕放不放、
+        // 调休怎么调是每年单定的。公布后把 KnownUntilYear 加一并重新编译，
+        // 或直接在 holidays.txt 里补 休/班（配置优先级更高，见 Get 的角标逻辑）。
+        private const int StatutoryKnownFromYear = 2025; // 新放假办法施行年
+        private const int StatutoryKnownUntilYear = 2026; // 已公布安排的最后一年
         public static bool IsStatutoryRest(DateTime d)
         {
+            if (d.Year < StatutoryKnownFromYear || d.Year > StatutoryKnownUntilYear) return false;
             if (d.Month == 1 && d.Day == 1) return true;   // 元旦
             if (d.Month == 5 && d.Day == 1) return true;   // 劳动节
             if (d.Month == 10 && d.Day == 1) return true;  // 国庆
@@ -542,6 +561,14 @@ namespace ChinaClock
             }
         }
 
+        // 滚轮翻月：向下滚 = 下个月，向上滚 = 上个月（与主流日历一致）
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            base.OnMouseWheel(e);
+            _viewMonth = _viewMonth.AddMonths(e.Delta < 0 ? 1 : -1);
+            Invalidate();
+        }
+
         private DateTime GridStart()
         {
             DateTime first = new DateTime(_viewMonth.Year, _viewMonth.Month, 1);
@@ -617,7 +644,8 @@ namespace ChinaClock
                 using (SolidBrush b = new SolidBrush(Color.FromArgb(238, 243, 252)))
                     g.FillRectangle(b, r);
 
-            Color numColor = other ? _cDim : (di.StatutoryRest || weekend ? _cRed : _cText);
+            bool workBadge = di.Badge == "班"; // 调休补班的周末按工作日着色
+            Color numColor = other ? _cDim : (workBadge ? _cText : (di.StatutoryRest || weekend ? _cRed : _cText));
             string sub = di.Festival ?? di.TermName ?? di.LunarText;
             Color subColor = other ? Color.FromArgb(222, 222, 222)
                 : di.Festival != null ? _cRed
@@ -630,8 +658,7 @@ namespace ChinaClock
                 int dsz = Scale(24);
                 Rectangle c = new Rectangle(r.X + (r.Width - dsz) / 2, r.Y + Scale(4), dsz, dsz);
                 using (SolidBrush b = new SolidBrush(_cAccent)) g.FillEllipse(b, c);
-                TextRenderer.DrawText(g, d.Day.ToString(), _fDay, c, Color.White,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                DrawInkCentered(g, d.Day.ToString(), _fDay, c, Color.White);
             }
             else
             {
@@ -652,6 +679,22 @@ namespace ChinaClock
                 TextRenderer.DrawText(g, di.Badge, _fSmall, br, fg,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
             }
+        }
+
+        // 按字形墨水边界精确居中绘制（GDI TextRenderer 的 VerticalCenter/HorizontalCenter
+        // 依据整行度量，单个数字会向左上偏 1~3px；这里用 GDI+ 实测墨水宽高后定位）
+        private void DrawInkCentered(Graphics g, string s, Font f, Rectangle rect, Color color)
+        {
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+            using (StringFormat sf = new StringFormat(StringFormat.GenericTypographic))
+            {
+                SizeF sz = g.MeasureString(s, f, rect.Size, sf);
+                float x = rect.X + (rect.Width - sz.Width) / 2f;
+                float y = rect.Y + (rect.Height - sz.Height) / 2f;
+                using (SolidBrush b = new SolidBrush(color))
+                    g.DrawString(s, f, b, x, y, sf);
+            }
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.SystemDefault;
         }
 
         private void DrawMiniButton(Graphics g, Rectangle r, string text)
@@ -698,6 +741,7 @@ namespace ChinaClock
         [DllImport("user32.dll")] private static extern IntPtr FindWindow(string cls, string title);
         [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr h, out RECT r);
         [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr h, int after, int x, int y, int cx, int cy, int flags);
+        [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hWnd);
 
         private delegate void WinEventDelegate(IntPtr hHook, int evt, IntPtr hwnd, int idObject, int idChild, int dwEventThread, int dwmsEventTime);
         [DllImport("user32.dll")] private static extern IntPtr SetWinEventHook(int eventMin, int eventMax, IntPtr hmodWinEventProc, WinEventDelegate lpfnWinEventProc, int idProcess, int idThread, int dwFlags);
@@ -940,56 +984,104 @@ namespace ChinaClock
             _f2 = new Font("Segoe UI", Math.Max(8, (int)Math.Round(h * 0.22f)), FontStyle.Regular, GraphicsUnit.Pixel);
         }
 
-        // 任务栏底色采样：在后台线程用 CopyFromScreen 抓取任务栏中线像素，众数统计出背景色。
-        // Win11 任务栏是半透明材质，颜色随背后壁纸平滑渐变，整条任务的众数可能取到
-        // 远离本窗口的颜色（比如壁纸左白右蓝时整条众数是白、本窗口处却是蓝），造成色差。
-        // 因此优先取"紧贴本窗口的相邻像素条"，只有其众数占比不足（被托盘图标占据）时
-        // 才逐级放宽到整条。注意：绝不能在 UI 线程逐点 GetPixel，会卡住界面。
+        // 任务栏底色采样：在后台线程用 CopyFromScreen 抓取任务栏像素条，取"均匀条"
+        // （条内极差小 = 无图标/边框/窗口干扰）的平均色作为背景。
+        // 两条铁律：
+        //  1. 优先在紧贴任务栏上/下边缘的细条采样——托盘图标都画在垂直居中一带，
+        //     贴边细条永远没有图标；旧版在垂直中线采样，图标密集时众数被带偏成
+        //     深色，覆盖窗就"变黑"了。
+        //  2. 干扰判定用"条内极差"，不能用"量化众数占比"：任务栏是 Mica 半透明
+        //     材质，颜色随壁纸横向缓慢渐变，8 级量化会把渐变切进相邻桶、众数占比
+        //     被稀释到阈值以下（实测只剩 52%），导致所有候选被误判失败、退回注册
+        //     表兜底色，时钟底色变成刺眼的纯白。极差判定对渐变免疫。
+        // 全部失败时退回注册表系统主题对应的任务栏标准色。
+        // 注意：绝不能在 UI 线程逐点 GetPixel，会卡住界面。
         private void SampleBackgroundAsync()
         {
             IntPtr tray = FindWindow("Shell_TrayWnd", null);
             if (tray == IntPtr.Zero) return;
             RECT tr;
             GetWindowRect(tray, out tr);
-            if (tr.Bottom - tr.Top < 20) return;
-            int y = tr.Top + (tr.Bottom - tr.Top) / 2;
+            int trH = tr.Bottom - tr.Top;
+            if (trH < 20) return;
+            // 任务栏自动隐藏收起后坐标已移出屏幕，采样会抓到无关窗口（如深色终端），直接跳过
+            Rectangle screen = Screen.PrimaryScreen.Bounds;
+            if (tr.Top >= screen.Bottom || tr.Bottom <= screen.Top || tr.Left >= screen.Right) return;
             bool vis = IsHandleCreated && Visible;
             int wl = vis ? Bounds.Left : 0, wrt = vis ? Bounds.Right : 0;
 
-            var strips = new List<int[]>();
-            if (vis)
+            int off = Math.Max(5, Math.Min(10, trH / 8)); // 贴边 5~10px：避开顶/底边框线与图标带
+            int yb = tr.Bottom - off, yt = tr.Top + off, ym = tr.Top + trH / 2;
+            int[][] xsNear =
             {
-                strips.Add(new[] { wl - 100, wl - 8 });
-                strips.Add(new[] { wl - 60, wl - 8 });
-                strips.Add(new[] { wl - 36, wl - 8 });
-                strips.Add(new[] { wrt + 2, tr.Right - 2 });   // 右侧边缘缝隙
-                strips.Add(new[] { wl - 20, wl - 8 });
-            }
-            strips.Add(new[] { tr.Left + 4, vis ? wl - 8 : tr.Right - 4 }); // 整条兜底
+                new[] { wl - 90, wl - 6 },       // 本窗口左侧附近（Mica 横向渐变时这里最接近）
+                new[] { wl - 180, wl - 90 },     // 稍远一点的左侧
+                new[] { wrt + 4, tr.Right - 8 }, // 右侧缝隙（避开最右"显示桌面"细条）
+            };
 
             System.Threading.ThreadPool.QueueUserWorkItem(delegate
             {
-                foreach (int[] s in strips)
+                Action<Color> apply = delegate(Color c)
                 {
-                    int x0 = Math.Max(tr.Left + 2, s[0]);
-                    int x1 = Math.Min(tr.Right - 2, s[1]);
-                    int w = x1 - x0 + 1;
-                    if (w < 4) continue;
-                    Color col;
-                    if (!TrySampleStrip(x0, y, w, out col)) continue;
                     if (IsHandleCreated)
-                        BeginInvoke((MethodInvoker)delegate { ApplyBackground(col); });
-                    return;
+                        BeginInvoke((MethodInvoker)delegate { ApplyBackground(c); });
+                };
+
+                Color col;
+                // 1) 上/下贴边细条（永远没有图标，最可靠）
+                foreach (int y in new[] { yb, yt })
+                {
+                    if (y <= screen.Top || y >= screen.Bottom) continue;
+                    foreach (int[] s in xsNear)
+                    {
+                        int x0 = Math.Max(tr.Left + 2, s[0]);
+                        int x1 = Math.Min(tr.Right - 8, s[1]);
+                        if (x1 - x0 + 1 < 30) continue;
+                        if (TrySampleStrip(x0, y, x1 - x0 + 1, out col)) { apply(col); return; }
+                    }
                 }
+                // 2) 垂直中线从时钟往左按 48px 步进扫描（同一水平线的 Mica 色最一致；
+                //    有图标/按钮的条极差巨大自动跳过，扫到第一个均匀条为止）
+                if (ym > screen.Top && ym < screen.Bottom)
+                {
+                    for (int x1 = Math.Min(wl - 6, tr.Right - 8); x1 > tr.Left + 60; x1 -= 48)
+                    {
+                        int x0 = Math.Max(tr.Left + 2, x1 - 48);
+                        if (TrySampleStrip(x0, ym, x1 - x0 + 1, out col)) { apply(col); return; }
+                    }
+                }
+                // 3) 采样全部失败（如截屏被策略阻挡）时按系统主题取标准任务栏色
+                apply(ThemeBaseColor());
             });
         }
 
+        // 读注册表系统主题（SystemUsesLightTheme），返回对应的任务栏标准底色（采样失败时兜底）
+        private static Color ThemeBaseColor()
+        {
+            bool light = true;
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(
+                    @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"))
+                {
+                    object v = k != null ? k.GetValue("SystemUsesLightTheme") : null;
+                    if (v is int) light = (int)v == 1;
+                }
+            }
+            catch { }
+            return light ? Color.FromArgb(243, 243, 243) : Color.FromArgb(32, 32, 32);
+        }
+
+        // 采样一条 w×1 像素：条内颜色极差 ≤20 视为"均匀"（没有图标/边框线/窗口
+        // 边缘等干扰），输出条内平均色。Mica 横向渐变在几十 px 内变化只有几个色阶，
+        // 极差判定完全免疫；而穿过图标的条极差动辄 200+，必然被拒。
         private static bool TrySampleStrip(int x0, int y, int w, out Color col)
         {
             col = Color.Empty;
             try
             {
-                var counts = new Dictionary<int, long[]>(); // key -> {数量, R和, G和, B和}
+                int minR = 255, maxR = 0, minG = 255, maxG = 0, minB = 255, maxB = 0;
+                long sumR = 0, sumG = 0, sumB = 0;
                 using (var bmp = new Bitmap(w, 1, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
                 {
                     using (var g = Graphics.FromImage(bmp))
@@ -1002,22 +1094,19 @@ namespace ChinaClock
                     bmp.UnlockBits(bd);
                     foreach (int px in buf)
                     {
-                        // 8 级量化分组：半透明任务栏的渐变（±2/通道）会稳定落在同一桶，
-                        // 保证众数占比可信；组内再取精确平均，消除量化误差带来的色差
-                        int key = ((px >> 16) & 0xF8) << 16 | ((px >> 8) & 0xF8) << 8 | (px & 0xF8);
-                        long[] acc;
-                        if (!counts.TryGetValue(key, out acc)) acc = new long[4];
-                        acc[0]++; acc[1] += (px >> 16) & 255; acc[2] += (px >> 8) & 255; acc[3] += px & 255;
-                        counts[key] = acc;
+                        int r = (px >> 16) & 255, gg = (px >> 8) & 255, b = px & 255;
+                        if (r < minR) minR = r;
+                        if (r > maxR) maxR = r;
+                        if (gg < minG) minG = gg;
+                        if (gg > maxG) maxG = gg;
+                        if (b < minB) minB = b;
+                        if (b > maxB) maxB = b;
+                        sumR += r; sumG += gg; sumB += b;
                     }
                 }
-
-                long bestKey = 0, bestN = 0;
-                foreach (var kv in counts)
-                    if (kv.Value[0] > bestN) { bestN = kv.Value[0]; bestKey = kv.Key; }
-                if (bestN * 5 < w * 3) return false; // 背景色占比不足 60%，采样条不可信
-                long[] a = counts[(int)bestKey];
-                col = Color.FromArgb((int)(a[1] / a[0]), (int)(a[2] / a[0]), (int)(a[3] / a[0]));
+                int range = Math.Max(maxR - minR, Math.Max(maxG - minG, maxB - minB));
+                if (range > 20) return false; // 条内有干扰，不可信
+                col = Color.FromArgb((int)(sumR / w), (int)(sumG / w), (int)(sumB / w));
                 return true;
             }
             catch { return false; }
@@ -1092,6 +1181,10 @@ namespace ChinaClock
             _panel.FormClosed += delegate { _panelClosedAt = DateTime.Now; };
             _panel.Show();
             _panel.Activate();
+            // 时钟本体是"不抢焦点"窗口（WS_EX_NOACTIVATE），点它不会改变前台焦点，
+            // 面板的 Activate 可能被系统拒绝 → 面板开着但没有键盘焦点，滚轮翻月/Esc
+            // 全部失效。这里显式把前台焦点交给面板（与系统日历 Win+N 弹出行为一致）。
+            SetForegroundWindow(_panel.Handle);
         }
 
         private ToolStripMenuItem _miAutoStart;
