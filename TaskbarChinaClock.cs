@@ -41,13 +41,11 @@ namespace ChinaClock
         private const int HWND_TOPMOST = -1;
         private const int SWP_NOSIZE = 1, SWP_NOMOVE = 2, SWP_NOACTIVATE = 0x10;
         private const int WM_SETTINGCHANGE = 0x001A;
+        private const int WM_DISPLAYCHANGE = 0x007E;
 
         [DllImport("user32.dll")] private static extern IntPtr FindWindow(string cls, string title);
         [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr h, out RECT r);
         [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr h, int after, int x, int y, int cx, int cy, int flags);
-        [DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr h);
-        [DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr h, IntPtr dc);
-        [DllImport("gdi32.dll")] private static extern int GetPixel(IntPtr dc, int x, int y);
         [DllImport("user32.dll")] private static extern void keybd_event(byte vk, byte scan, int flags, IntPtr extra);
 
         [StructLayout(LayoutKind.Sequential)]
@@ -63,6 +61,7 @@ namespace ChinaClock
 
         private readonly System.Windows.Forms.Timer _uiTimer = new System.Windows.Forms.Timer();  // 秒级刷新文字
         private readonly System.Windows.Forms.Timer _fitTimer = new System.Windows.Forms.Timer(); // 定期重新定位/保持置顶
+        private readonly System.Windows.Forms.Timer _bgTimer = new System.Windows.Forms.Timer();  // 低频任务栏底色采样
 
         private Rectangle _nativeRect;   // 系统时钟区域（物理像素）
         private Rectangle _trayRect;     // 任务栏区域
@@ -87,6 +86,8 @@ namespace ChinaClock
             _uiTimer.Tick += delegate { UpdateTime(); };
             _fitTimer.Interval = 4000;
             _fitTimer.Tick += delegate { FitToNativeClock(Rectangle.Empty); };
+            _bgTimer.Interval = 15000;
+            _bgTimer.Tick += delegate { SampleBackgroundAsync(); };
         }
 
         protected override bool ShowWithoutActivation { get { return true; } }
@@ -110,6 +111,8 @@ namespace ChinaClock
             FitToNativeClock(GeometricGuess());
             _uiTimer.Start();
             _fitTimer.Start();
+            _bgTimer.Start();
+            SampleBackgroundAsync();
 
             System.Threading.ThreadPool.QueueUserWorkItem(delegate
             {
@@ -128,10 +131,6 @@ namespace ChinaClock
             if (r.IsEmpty) r = _nativeRect.IsEmpty ? GeometricGuess() : _nativeRect;
             else _nativeRect = r;
             if (r.IsEmpty || _trayRect.IsEmpty) return;
-
-            // 任务栏底色：沿任务栏中线取一排像素做众数统计（避开本窗口区域），
-            // 纯色背景必占多数，托盘图标等干扰自动被排除
-            ResampleBackground();
 
             RecalcFonts(r.Height + 4);
             Size s1 = TextRenderer.MeasureText(_timeText, _f1);
@@ -224,38 +223,72 @@ namespace ChinaClock
             _f2 = new Font("Segoe UI", Math.Max(8, (int)Math.Round(h * 0.22f)), FontStyle.Regular, GraphicsUnit.Pixel);
         }
 
-        private void ResampleBackground()
+        // 任务栏底色采样：在后台线程用 CopyFromScreen 一次性抓取任务栏中线一整条
+        // 像素（避开本窗口区域），众数统计出纯色背景，托盘图标等干扰自动被排除。
+        // 注意：绝不能在 UI 线程逐点 GetPixel —— 几百次跨 DWM 同步读取会卡住
+        // 界面线程，秒刷新定时器的消息被合并，表现为时间 5 秒才跳一次。
+        private void SampleBackgroundAsync()
         {
-            if (_trayRect.IsEmpty || _trayRect.Width < 100) return;
-            int y = _trayRect.Top + _trayRect.Height / 2;
-            int x0 = _trayRect.Left + 4;
-            int x1 = (IsHandleCreated && Visible) ? Bounds.Left - 8 : _trayRect.Right - 4;
-            if (x1 - x0 < 40) return;
+            IntPtr tray = FindWindow("Shell_TrayWnd", null);
+            if (tray == IntPtr.Zero) return;
+            RECT tr;
+            GetWindowRect(tray, out tr);
+            int y = tr.Top + (tr.Bottom - tr.Top) / 2;
+            int x0 = tr.Left + 4;
+            int x1 = (IsHandleCreated && Visible) ? Bounds.Left - 8 : tr.Right - 4;
+            int w = x1 - x0;
+            if (w < 100 || tr.Bottom - tr.Top < 20) return;
 
-            var counts = new Dictionary<int, int>();
-            IntPtr dc = GetDC(IntPtr.Zero);
-            for (int x = x0; x <= x1; x += 6)
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
             {
-                int c = GetPixel(dc, x, y);
-                if (c == -1) continue;
-                int key = ((c >> 0) & 0xF8) << 16 | ((c >> 8) & 0xF8) << 8 | ((c >> 16) & 0xF8); // 量化到 8 级
-                int n;
-                counts[key] = counts.TryGetValue(key, out n) ? n + 1 : 1;
-            }
-            ReleaseDC(IntPtr.Zero, dc);
+                try
+                {
+                    var counts = new Dictionary<int, int>();
+                    using (var bmp = new Bitmap(w, 1, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                    {
+                        using (var g = Graphics.FromImage(bmp))
+                            g.CopyFromScreen(x0, y, 0, 0, new Size(w, 1));
+                        var bd = bmp.LockBits(new Rectangle(0, 0, w, 1),
+                            System.Drawing.Imaging.ImageLockMode.ReadOnly,
+                            System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                        var buf = new int[w];
+                        Marshal.Copy(bd.Scan0, buf, 0, w);
+                        bmp.UnlockBits(bd);
+                        foreach (int px in buf)
+                        {
+                            int key = ((px >> 16) & 0xF8) << 16 | ((px >> 8) & 0xF8) << 8 | (px & 0xF8); // 量化到 8 级
+                            int n;
+                            counts[key] = counts.TryGetValue(key, out n) ? n + 1 : 1;
+                        }
+                    }
 
-            int bestKey = 0, bestN = 0;
-            foreach (var kv in counts)
-                if (kv.Value > bestN) { bestN = kv.Value; bestKey = kv.Key; }
-            if (bestN < 5) return;
+                    int bestKey = 0, bestN = 0;
+                    foreach (var kv in counts)
+                        if (kv.Value > bestN) { bestN = kv.Value; bestKey = kv.Key; }
+                    if (bestN * 2 < w) return; // 背景色占比不足一半，采样不可信
+                    var col = Color.FromArgb((bestKey >> 16) & 255, (bestKey >> 8) & 255, bestKey & 255);
+                    if (IsHandleCreated)
+                        BeginInvoke((MethodInvoker)delegate { ApplyBackground(col); });
+                }
+                catch { }
+            });
+        }
 
-            var col = Color.FromArgb((bestKey >> 16) & 255, (bestKey >> 8) & 255, bestKey & 255);
+        private void ApplyBackground(Color col)
+        {
             if (col == _bg) return;
             _bg = col;
             BackColor = col;
             double lum = 0.299 * col.R + 0.587 * col.G + 0.114 * col.B;
             _lightTaskbar = lum > 140;
             Invalidate();
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            base.WndProc(ref m);
+            if (m.Msg == WM_SETTINGCHANGE || m.Msg == WM_DISPLAYCHANGE)
+                SampleBackgroundAsync(); // 主题/壁纸/分辨率变化后重采底色（后台线程，不卡界面）
         }
 
         // ---- 时间文字 ----
@@ -364,6 +397,7 @@ namespace ChinaClock
         {
             _uiTimer.Stop();
             _fitTimer.Stop();
+            _bgTimer.Stop();
             if (_f1 != null) _f1.Dispose();
             if (_f2 != null) _f2.Dispose();
             base.OnFormClosed(e);
