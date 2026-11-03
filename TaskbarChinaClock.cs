@@ -778,6 +778,7 @@ namespace ChinaClock
         {
             base.OnShown(e);
             if (_openPanel) TogglePanel();
+            SampleBackgroundAsync(); // 首次显示后立刻按"可见状态"重新采底色（不等 15s 定时器）
         }
 
         // ---- 定位：找到系统时钟并覆盖 ----
@@ -881,55 +882,89 @@ namespace ChinaClock
             _f2 = new Font("Segoe UI", Math.Max(8, (int)Math.Round(h * 0.22f)), FontStyle.Regular, GraphicsUnit.Pixel);
         }
 
-        // 任务栏底色采样：在后台线程用 CopyFromScreen 一次性抓取任务栏中线一整条
-        // 像素（避开本窗口区域），众数统计出纯色背景，托盘图标等干扰自动被排除。
-        // 注意：绝不能在 UI 线程逐点 GetPixel —— 几百次跨 DWM 同步读取会卡住
-        // 界面线程，秒刷新定时器的消息被合并，表现为时间 5 秒才跳一次。
+        // 任务栏底色采样：在后台线程用 CopyFromScreen 抓取任务栏中线像素，众数统计出背景色。
+        // Win11 任务栏是半透明材质，颜色随背后壁纸平滑渐变，整条任务的众数可能取到
+        // 远离本窗口的颜色（比如壁纸左白右蓝时整条众数是白、本窗口处却是蓝），造成色差。
+        // 因此优先取"紧贴本窗口的相邻像素条"，只有其众数占比不足（被托盘图标占据）时
+        // 才逐级放宽到整条。注意：绝不能在 UI 线程逐点 GetPixel，会卡住界面。
         private void SampleBackgroundAsync()
         {
             IntPtr tray = FindWindow("Shell_TrayWnd", null);
             if (tray == IntPtr.Zero) return;
             RECT tr;
             GetWindowRect(tray, out tr);
+            if (tr.Bottom - tr.Top < 20) return;
             int y = tr.Top + (tr.Bottom - tr.Top) / 2;
-            int x0 = tr.Left + 4;
-            int x1 = (IsHandleCreated && Visible) ? Bounds.Left - 8 : tr.Right - 4;
-            int w = x1 - x0;
-            if (w < 100 || tr.Bottom - tr.Top < 20) return;
+            bool vis = IsHandleCreated && Visible;
+
+            var strips = new List<int[]>();
+            if (vis)
+            {
+                int l = Bounds.Left, r = Bounds.Right;
+                // 左侧相邻条逐级收窄：紧邻区域可能挤着托盘图标，窄条更容易避开图标、
+                // 且颜色最接近色块底下（半透明任务栏随壁纸渐变）
+                strips.Add(new[] { l - 100, l - 8 });
+                strips.Add(new[] { l - 60, l - 8 });
+                strips.Add(new[] { l - 36, l - 8 });
+                strips.Add(new[] { r + 2, tr.Right - 2 });   // 右侧边缘缝隙
+                strips.Add(new[] { l - 20, l - 8 });
+            }
+            strips.Add(new[] { tr.Left + 4, vis ? Bounds.Left - 8 : tr.Right - 4 }); // 整条兜底
 
             System.Threading.ThreadPool.QueueUserWorkItem(delegate
             {
-                try
+                foreach (int[] s in strips)
                 {
-                    var counts = new Dictionary<int, int>();
-                    using (var bmp = new Bitmap(w, 1, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
-                    {
-                        using (var g = Graphics.FromImage(bmp))
-                            g.CopyFromScreen(x0, y, 0, 0, new Size(w, 1));
-                        var bd = bmp.LockBits(new Rectangle(0, 0, w, 1),
-                            System.Drawing.Imaging.ImageLockMode.ReadOnly,
-                            System.Drawing.Imaging.PixelFormat.Format32bppArgb);
-                        var buf = new int[w];
-                        Marshal.Copy(bd.Scan0, buf, 0, w);
-                        bmp.UnlockBits(bd);
-                        foreach (int px in buf)
-                        {
-                            int key = ((px >> 16) & 0xF8) << 16 | ((px >> 8) & 0xF8) << 8 | (px & 0xF8); // 量化到 8 级
-                            int n;
-                            counts[key] = counts.TryGetValue(key, out n) ? n + 1 : 1;
-                        }
-                    }
-
-                    int bestKey = 0, bestN = 0;
-                    foreach (var kv in counts)
-                        if (kv.Value > bestN) { bestN = kv.Value; bestKey = kv.Key; }
-                    if (bestN * 2 < w) return; // 背景色占比不足一半，采样不可信
-                    var col = Color.FromArgb((bestKey >> 16) & 255, (bestKey >> 8) & 255, bestKey & 255);
+                    int x0 = Math.Max(tr.Left + 2, s[0]);
+                    int x1 = Math.Min(tr.Right - 2, s[1]);
+                    int w = x1 - x0 + 1;
+                    if (w < 4) continue;
+                    Color col;
+                    if (!TrySampleStrip(x0, y, w, out col)) continue;
                     if (IsHandleCreated)
                         BeginInvoke((MethodInvoker)delegate { ApplyBackground(col); });
+                    return;
                 }
-                catch { }
             });
+        }
+
+        private static bool TrySampleStrip(int x0, int y, int w, out Color col)
+        {
+            col = Color.Empty;
+            try
+            {
+                var counts = new Dictionary<int, long[]>(); // key -> {数量, R和, G和, B和}
+                using (var bmp = new Bitmap(w, 1, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                {
+                    using (var g = Graphics.FromImage(bmp))
+                        g.CopyFromScreen(x0, y, 0, 0, new Size(w, 1));
+                    var bd = bmp.LockBits(new Rectangle(0, 0, w, 1),
+                        System.Drawing.Imaging.ImageLockMode.ReadOnly,
+                        System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                    var buf = new int[w];
+                    Marshal.Copy(bd.Scan0, buf, 0, w);
+                    bmp.UnlockBits(bd);
+                    foreach (int px in buf)
+                    {
+                        // 8 级量化分组：半透明任务栏的渐变（±2/通道）会稳定落在同一桶，
+                        // 保证众数占比可信；组内再取精确平均，消除量化误差带来的色差
+                        int key = ((px >> 16) & 0xF8) << 16 | ((px >> 8) & 0xF8) << 8 | (px & 0xF8);
+                        long[] acc;
+                        if (!counts.TryGetValue(key, out acc)) acc = new long[4];
+                        acc[0]++; acc[1] += (px >> 16) & 255; acc[2] += (px >> 8) & 255; acc[3] += px & 255;
+                        counts[key] = acc;
+                    }
+                }
+
+                long bestKey = 0, bestN = 0;
+                foreach (var kv in counts)
+                    if (kv.Value[0] > bestN) { bestN = kv.Value[0]; bestKey = kv.Key; }
+                if (bestN * 5 < w * 3) return false; // 背景色占比不足 60%，采样条不可信
+                long[] a = counts[(int)bestKey];
+                col = Color.FromArgb((int)(a[1] / a[0]), (int)(a[2] / a[0]), (int)(a[3] / a[0]));
+                return true;
+            }
+            catch { return false; }
         }
 
         private void ApplyBackground(Color col)
