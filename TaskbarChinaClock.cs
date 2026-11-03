@@ -690,18 +690,37 @@ namespace ChinaClock
     internal sealed class ClockForm : Form
     {
         private const int HWND_TOPMOST = -1;
-        private const int SWP_NOSIZE = 1, SWP_NOMOVE = 2, SWP_NOACTIVATE = 0x10;
+        private const int SWP_NOSIZE = 1, SWP_NOMOVE = 2, SWP_NOACTIVATE = 0x10, SWP_ASYNCWINDOWPOS = 0x4000, SWP_FRAMECHANGED = 0x20;
         private const int EVENT_SYSTEM_FOREGROUND = 0x0003; // 前台窗口切换
         private const int EVENT_OBJECT_REORDER = 0x8004;    // 窗口 Z 序变化
         private const int WINEVENT_OUTOFCONTEXT = 0x0;
+        private const uint GA_ROOT = 2;
+        private const int SW_HIDE = 0, SW_SHOW = 5;
 
         [DllImport("user32.dll")] private static extern IntPtr FindWindow(string cls, string title);
+        [DllImport("user32.dll")] private static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string title);
         [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr h, out RECT r);
         [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr h, int after, int x, int y, int cx, int cy, int flags);
+        [DllImport("user32.dll")] private static extern IntPtr SetParent(IntPtr hChild, IntPtr hNewParent);
+        [DllImport("user32.dll")] private static extern IntPtr GetParent(IntPtr h);
+        [DllImport("user32.dll")] private static extern int GetWindowLong(IntPtr h, int idx);
+        [DllImport("user32.dll")] private static extern int SetWindowLong(IntPtr h, int idx, int val);
+
+        private const int GWL_STYLE = -16;
+        private const int WS_CHILD = 0x40000000;
+        private const int WS_POPUP = unchecked((int)0x80000000);
 
         private delegate void WinEventDelegate(IntPtr hHook, int evt, IntPtr hwnd, int idObject, int idChild, int dwEventThread, int dwmsEventTime);
         [DllImport("user32.dll")] private static extern IntPtr SetWinEventHook(int eventMin, int eventMax, IntPtr hmodWinEventProc, WinEventDelegate lpfnWinEventProc, int idProcess, int idThread, int dwFlags);
         [DllImport("user32.dll")] private static extern bool UnhookWinEvent(IntPtr hWinEventHook);
+        [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(POINT p);
+        [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr h, uint flags);
+        [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr h);
+        [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr h);
+        [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr h, int nCmdShow);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINT { public int X, Y; }
 
         [StructLayout(LayoutKind.Sequential)]
         private struct RECT { public int Left, Top, Right, Bottom; }
@@ -717,6 +736,17 @@ namespace ChinaClock
         private readonly System.Windows.Forms.Timer _uiTimer = new System.Windows.Forms.Timer();  // 秒级刷新文字
         private readonly System.Windows.Forms.Timer _fitTimer = new System.Windows.Forms.Timer(); // 定期重新定位/保持置顶
         private readonly System.Windows.Forms.Timer _bgTimer = new System.Windows.Forms.Timer();  // 低频任务栏底色采样
+        // 保层不用 WinForms 定时器：WM_TIMER 是低优先级消息，点击任务栏的激活事件风暴中
+        // 会被饿死（实测露出 ~500ms）。改用后台线程 3ms 轮询覆盖状态。
+        private volatile bool _keepTopRunning;
+        private IntPtr _mainHandle = IntPtr.Zero;
+        private bool _embedded;   // true = 已嵌入任务栏作为子窗口（与任务栏同层级，不可被盖）
+        private Rectangle _lastApplied = Rectangle.Empty;
+        private int _coveredTicks;                    // 连续被盖的检测次数（3ms/次）
+        private DateTime _lastModeFlip = DateTime.MinValue;
+        private DateTime _lastBurst = DateTime.MinValue;
+        private IntPtr _trayNotify = IntPtr.Zero;     // 原生时钟宿主窗口（TrayNotifyWnd）
+        private bool _notifyHiddenByUs;
 
         private Rectangle _nativeRect;   // 系统时钟区域（物理像素）
         private Rectangle _trayRect;     // 任务栏区域
@@ -727,7 +757,6 @@ namespace ChinaClock
         private int _fontH = -1;
         private DateTime _lastToggle = DateTime.MinValue;
         private DateTime _panelClosedAt = DateTime.MinValue;
-        private DateTime _lastAssert = DateTime.MinValue;
         private CalendarPanel _panel;
         private WinEventDelegate _hookProc;  // 保持引用防 GC 回收，否则钩子会失效
         private IntPtr _hookFore = IntPtr.Zero, _hookReorder = IntPtr.Zero;
@@ -791,6 +820,96 @@ namespace ChinaClock
             _hookProc = WinEventProc;
             _hookFore = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, IntPtr.Zero, _hookProc, 0, 0, WINEVENT_OUTOFCONTEXT);
             _hookReorder = SetWinEventHook(EVENT_OBJECT_REORDER, EVENT_OBJECT_REORDER, IntPtr.Zero, _hookProc, 0, 0, WINEVENT_OUTOFCONTEXT);
+
+            // 后台保层线程：轮询检测时钟位置是否被盖住，被盖则异步置顶。
+            // 不走 UI 线程消息（WM_TIMER 会被事件风暴饿死）；SWP_ASYNCWINDOWPOS 保证
+            // 调用不被 UI 线程阻塞，覆盖暴露窗口 ≤ ~5ms（不足一帧，肉眼不可见）。
+            _mainHandle = Handle;
+            _keepTopRunning = true;
+            System.Threading.Thread t = new System.Threading.Thread(KeepTopLoop);
+            t.IsBackground = true;
+            t.Start();
+
+            // 首选"嵌入任务栏"模式：时钟作为任务栏子窗口，与任务栏同层级，任务栏
+            // 成为前台被抬高时也不会被盖（失败则自动保持覆盖模式并定期重试嵌入）
+            TryEmbed();
+            HideNativeClock();
+        }
+
+        // 隐藏原生时钟宿主窗口 TrayNotifyWnd。Win11 任务栏的时钟由该窗口内的
+        // XAML 组合内容绘制，组合层永远在传统子窗口之上（SetWindowPos 无法赢），
+        // 且命中测试与可见内容不一致；隐藏宿主后竞争彻底消失。退出时恢复。
+        // explorer 重建该窗口后由 FitToNativeClock 周期性重新隐藏。
+        private void HideNativeClock()
+        {
+            if (_trayHwnd == IntPtr.Zero) return;
+            IntPtr tn = FindWindowEx(_trayHwnd, IntPtr.Zero, "TrayNotifyWnd", null);
+            if (tn == IntPtr.Zero) { _trayNotify = IntPtr.Zero; return; } // 此版本无该窗口（组合式托盘），维持现状
+            if (!IsWindowVisible(tn)) { _trayNotify = tn; return; }       // 已隐藏
+            if (ShowWindow(tn, SW_HIDE)) { _trayNotify = tn; _notifyHiddenByUs = true; }
+        }
+
+        private void RestoreNativeClock()
+        {
+            try
+            {
+                if (_trayNotify != IntPtr.Zero && IsWindowVisible(_trayNotify) == false && _notifyHiddenByUs)
+                {
+                    // 仅恢复由我们隐藏的窗口（explorer 可能已重建）
+                    if (IsWindow(_trayNotify))
+                    {
+                        ShowWindow(_trayNotify, SW_SHOW);
+                        _notifyHiddenByUs = false;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void KeepTopLoop()
+        {
+            while (_keepTopRunning)
+            {
+                System.Threading.Thread.Sleep(3);
+                try
+                {
+                    Rectangle r = _nativeRect;
+                    if (r.IsEmpty) continue;
+                    POINT p;
+                    p.X = r.Left + r.Width / 2;
+                    p.Y = r.Top + r.Height / 2;
+                    IntPtr h = WindowFromPoint(p);
+                    if (h == IntPtr.Zero) continue;
+                    IntPtr root = GetAncestor(h, GA_ROOT);
+
+                    if (_embedded)
+                    {
+                        // 嵌入模式：子窗口跟随任务栏，正常情况不会被盖。
+                        // 被盖自愈两类：① explorer 重排兄弟子窗口 → 顶回兄弟最前；
+                        // ② 持续被独立顶层窗（如通知到达时压到任务栏上层的系统托盘
+                        //    框架）压住——子窗口打不过它 → 持续 2 秒后退回覆盖模式对抗。
+                        if (h == _mainHandle) { _coveredTicks = 0; continue; }
+                        if (root == _trayHwnd)
+                            SetWindowPos(_mainHandle, 0, 0, 0, 0, 0,
+                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                        _coveredTicks++;
+                        if (_coveredTicks > 600 && (DateTime.Now - _lastModeFlip).TotalSeconds > 3)
+                            UnembedToOverlay();
+                    }
+                    else
+                    {
+                        // 覆盖模式：置顶对抗。打不过"任务栏成为前台被钉住"的场景
+                        // （SetWindowPos 无法越过前台任务栏）→ 持续 2 秒被盖则重新嵌入
+                        if (root == _mainHandle) { _coveredTicks = 0; continue; }
+                        SetWindowPos(_mainHandle, HWND_TOPMOST, 0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+                        _coveredTicks++;
+                        if (_coveredTicks > 600 && (DateTime.Now - _lastModeFlip).TotalSeconds > 3)
+                            TryEmbed();
+                    }
+                }
+                catch { }
+            }
         }
 
         private void WinEventProc(IntPtr hHook, int evt, IntPtr hwnd, int idObject, int idChild, int dwEventThread, int dwmsEventTime)
@@ -798,14 +917,28 @@ namespace ChinaClock
             // 前台切换（点任务栏、开关托盘浮层都会触发）或任务栏自身 Z 序变化
             if (evt != EVENT_SYSTEM_FOREGROUND && hwnd != _trayHwnd) return;
             AssertTopmost();
+            // 桥窗口（任务栏 XAML 内容）恰在此类事件的同一次布局里创建并盖住子窗口，
+            // 单次声明会输掉 → 触发一次 450ms 的连续顶回突发（后台线程，每 3ms 一次）
+            DateTime now = DateTime.Now;
+            if ((now - _lastBurst).TotalMilliseconds < 1000) return;
+            _lastBurst = now;
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
+            {
+                for (int i = 0; i < 150 && _keepTopRunning; i++)
+                {
+                    AssertTopmost();
+                    System.Threading.Thread.Sleep(3);
+                }
+            });
         }
 
         private void AssertTopmost()
         {
             if (!IsHandleCreated) return;
-            if ((DateTime.Now - _lastAssert).TotalMilliseconds < 150) return; // 事件风暴节流
-            _lastAssert = DateTime.Now;
-            SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            if (_embedded)
+                SetWindowPos(_mainHandle, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            else
+                SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
 
         protected override void OnShown(EventArgs e)
@@ -832,13 +965,78 @@ namespace ChinaClock
             int h = r.Height + 4;
             int right = Math.Min(r.Right + 4, _trayRect.Right - 1);
             var target = new Rectangle(right - w, r.Top + r.Height / 2 - h / 2, w, h);
-            if (Bounds != target)
+
+            if (_embedded)
             {
-                Bounds = target;
-                Invalidate();
+                // explorer 重建任务栏后父窗口会失效（极端情况下我们的窗口随之被销毁），自动重新挂靠
+                if (!IsHandleCreated || GetParent(_mainHandle) != _trayHwnd) { TryEmbed(); return; }
+                RepositionChild(target);
             }
-            if (IsHandleCreated)
-                SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            else
+            {
+                if (Bounds != target) { Bounds = target; Invalidate(); }
+                if (IsHandleCreated) AssertTopmost();
+                else TryEmbed(); // 覆盖模式启动失败时改为尝试嵌入
+            }
+            // explorer 重建 TrayNotifyWnd 后会重新露出原生时钟，周期性重新隐藏
+            if (_trayNotify == IntPtr.Zero || !IsWindow(_trayNotify) || IsWindowVisible(_trayNotify))
+                HideNativeClock();
+        }
+
+        // 把时钟窗口嵌入任务栏作为子窗口（TrayNotifyWnd 之上）。
+        // 这是彻底解决层级竞争的方案：任务栏成为前台被抬高时，子窗口跟随任务栏，
+        // 不会被盖住（原生时钟机制相同）。SetParent 失败则保持覆盖模式。
+        private void TryEmbed()
+        {
+            EnsureTrayRect();
+            if (_trayHwnd == IntPtr.Zero) return;
+            try
+            {
+                if (!IsHandleCreated) { try { RecreateHandle(); } catch { return; } }
+                if (!IsHandleCreated) return;
+                _mainHandle = Handle;
+                if (GetParent(_mainHandle) == _trayHwnd) { _embedded = true; return; }
+
+                int style = GetWindowLong(_mainHandle, GWL_STYLE);
+                SetWindowLong(_mainHandle, GWL_STYLE, (int)((style & ~WS_POPUP) | WS_CHILD));
+                if (SetParent(_mainHandle, _trayHwnd) == IntPtr.Zero) return;
+                // 兄弟窗口内置顶（位于 XAML 桥 / TrayNotifyWnd 之上）
+                SetWindowPos(_mainHandle, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+                _embedded = true;
+                _coveredTicks = 0;
+                _lastModeFlip = DateTime.Now;
+                FitToNativeClock(Rectangle.Empty); // 立即按任务栏客户区坐标就位
+            }
+            catch { }
+        }
+
+        // 嵌入模式下遇到子窗口打不过的覆盖源（持续 2 秒被压）时调用：
+        // 退回"独立置顶窗口"覆盖模式，用 HWND_TOPMOST 与对方对抗
+        private void UnembedToOverlay()
+        {
+            try
+            {
+                if (!IsHandleCreated) return;
+                int style = GetWindowLong(_mainHandle, GWL_STYLE);
+                SetWindowLong(_mainHandle, GWL_STYLE, (int)((style & ~WS_CHILD) | WS_POPUP));
+                SetParent(_mainHandle, IntPtr.Zero);
+                _embedded = false;
+                _coveredTicks = 0;
+                _lastModeFlip = DateTime.Now;
+                FitToNativeClock(Rectangle.Empty); // 顶层坐标就位 + 立即置顶
+            }
+            catch { }
+        }
+
+        // 嵌入模式下按任务栏客户区坐标定位（targetAbs 为屏幕绝对坐标）
+        private void RepositionChild(Rectangle targetAbs)
+        {
+            RECT tr;
+            GetWindowRect(_trayHwnd, out tr);
+            SetWindowPos(_mainHandle, 0, targetAbs.X - tr.Left, targetAbs.Y - tr.Top,
+                targetAbs.Width, targetAbs.Height, SWP_NOACTIVATE);
+            _lastApplied = targetAbs;
+            Invalidate();
         }
 
         // 刷新任务栏矩形（FindWindow/GetWindowRect 很快，可在 UI 线程调用；explorer 重启后也能自恢复）
@@ -930,21 +1128,27 @@ namespace ChinaClock
             GetWindowRect(tray, out tr);
             if (tr.Bottom - tr.Top < 20) return;
             int y = tr.Top + (tr.Bottom - tr.Top) / 2;
-            bool vis = IsHandleCreated && Visible;
+            // 用 GetWindowRect 取屏幕坐标（嵌入任务栏后 Control.Bounds 语义不可靠）
+            int wl = 0, wrt = 0;
+            bool vis = false;
+            RECT wr2;
+            if (IsHandleCreated && GetWindowRect(_mainHandle, out wr2) && IsWindowVisible(_mainHandle))
+            {
+                wl = wr2.Left;
+                wrt = wr2.Right;
+                vis = true;
+            }
 
             var strips = new List<int[]>();
             if (vis)
             {
-                int l = Bounds.Left, r = Bounds.Right;
-                // 左侧相邻条逐级收窄：紧邻区域可能挤着托盘图标，窄条更容易避开图标、
-                // 且颜色最接近色块底下（半透明任务栏随壁纸渐变）
-                strips.Add(new[] { l - 100, l - 8 });
-                strips.Add(new[] { l - 60, l - 8 });
-                strips.Add(new[] { l - 36, l - 8 });
-                strips.Add(new[] { r + 2, tr.Right - 2 });   // 右侧边缘缝隙
-                strips.Add(new[] { l - 20, l - 8 });
+                strips.Add(new[] { wl - 100, wl - 8 });
+                strips.Add(new[] { wl - 60, wl - 8 });
+                strips.Add(new[] { wl - 36, wl - 8 });
+                strips.Add(new[] { wrt + 2, tr.Right - 2 });   // 右侧边缘缝隙
+                strips.Add(new[] { wl - 20, wl - 8 });
             }
-            strips.Add(new[] { tr.Left + 4, vis ? Bounds.Left - 8 : tr.Right - 4 }); // 整条兜底
+            strips.Add(new[] { tr.Left + 4, vis ? wl - 8 : tr.Right - 4 }); // 整条兜底
 
             System.Threading.ThreadPool.QueueUserWorkItem(delegate
             {
@@ -1144,6 +1348,8 @@ namespace ChinaClock
             _uiTimer.Stop();
             _fitTimer.Stop();
             _bgTimer.Stop();
+            _keepTopRunning = false;
+            RestoreNativeClock();
             if (_hookFore != IntPtr.Zero) UnhookWinEvent(_hookFore);
             if (_hookReorder != IntPtr.Zero) UnhookWinEvent(_hookReorder);
             _hookProc = null;
