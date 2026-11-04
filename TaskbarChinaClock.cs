@@ -57,6 +57,17 @@ namespace ChinaClock
             bool agendaDemo = Array.IndexOf(a, "--agenda-demo") >= 0;
             bool listDemo = Array.IndexOf(a, "--list-demo") >= 0;
             bool pickerDemo = Array.IndexOf(a, "--picker-demo") >= 0;
+            bool dayDemo = Array.IndexOf(a, "--day-detail") >= 0;
+            // 调试入口：--pretend-dock:left|top|right 强制按指定停靠边定位（无需真的挪任务栏）
+            foreach (string x in a)
+                if (x.StartsWith("--pretend-dock:", StringComparison.OrdinalIgnoreCase))
+                {
+                    string v = x.Substring("--pretend-dock:".Length).Trim();
+                    if (v.Equals("left", StringComparison.OrdinalIgnoreCase)) TaskbarLayout.PretendDock = DockEdge.Left;
+                    else if (v.Equals("right", StringComparison.OrdinalIgnoreCase)) TaskbarLayout.PretendDock = DockEdge.Right;
+                    else if (v.Equals("top", StringComparison.OrdinalIgnoreCase)) TaskbarLayout.PretendDock = DockEdge.Top;
+                    else TaskbarLayout.PretendDock = DockEdge.Bottom;
+                }
 
             bool createdNew;
             using (new System.Threading.Mutex(true, "ChinaClock_SingleInstance", out createdNew))
@@ -65,7 +76,7 @@ namespace ChinaClock
                 try { SetProcessDPIAware(); } catch { }
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                Application.Run(new ClockForm(openPanel, openSettings, agendaDemo, listDemo, pickerDemo));
+                Application.Run(new ClockForm(openPanel, openSettings, agendaDemo, listDemo, pickerDemo, dayDemo));
             }
         }
     }
@@ -173,6 +184,62 @@ namespace ChinaClock
             Check(lines, ref fails, "角标原因 国庆节(在线名)", CalendarData.BadgeReason(new DateTime(2026, 10, 1), "休", null) != null,
                 CalendarData.BadgeReason(new DateTime(2026, 10, 1), "休", null) ?? "(null)");
 
+            // ---- F1：黄历（Almanac 纯函数）----
+            Check(lines, ref fails, "六十甲子序 甲子=0", Almanac.GanZhiIndex("甲子") == 0,
+                Almanac.GanZhiIndex("甲子").ToString());
+            Check(lines, ref fails, "六十甲子序 甲申=20", Almanac.GanZhiIndex("甲申") == 20,
+                Almanac.GanZhiIndex("甲申").ToString());
+            Check(lines, ref fails, "六十甲子序 庚辰=16", Almanac.GanZhiIndex("庚辰") == 16,
+                Almanac.GanZhiIndex("庚辰").ToString());
+            Check(lines, ref fails, "纳音 甲子=海中金", Almanac.Nayin("甲子") == "海中金", Almanac.Nayin("甲子"));
+            Check(lines, ref fails, "纳音 甲申=泉中水", Almanac.Nayin("甲申") == "泉中水", Almanac.Nayin("甲申"));
+            Check(lines, ref fails, "纳音 庚辰=白蜡金", Almanac.Nayin("庚辰") == "白蜡金", Almanac.Nayin("庚辰"));
+            Check(lines, ref fails, "纳音 壬戌=大海水", Almanac.Nayin("壬戌") == "大海水", Almanac.Nayin("壬戌"));
+            Check(lines, ref fails, "冲煞 甲申=冲虎（甲寅）·煞南", Almanac.ChongSha("甲申") == "冲虎（甲寅）· 煞南",
+                Almanac.ChongSha("甲申") ?? "(null)");
+            Check(lines, ref fails, "建星 甲子日/酉月=平", Almanac.Officer("甲子", "癸酉") == "平",
+                Almanac.Officer("甲子", "癸酉") ?? "(null)");
+            bool yl1949;
+            string zs1949 = Almanac.ZhiShen("甲子", "癸酉", out yl1949);
+            Check(lines, ref fails, "值神 甲子日/酉月=司命(黄道)", zs1949 == "司命" && yl1949, zs1949 + (yl1949 ? "/黄道" : "/黑道"));
+            bool structOk = true; string structBad = "";
+            string[] offNames = { "建", "除", "满", "平", "定", "执", "破", "危", "成", "收", "开", "闭" };
+            string[] zsNames = { "青龙", "明堂", "天刑", "朱雀", "金匮", "天德", "白虎", "玉堂", "天牢", "玄武", "司命", "勾陈" };
+            for (DateTime t = new DateTime(2026, 1, 1); t.Year == 2026 && structOk; t = t.AddDays(1))
+            {
+                CalendarData.DayInfo di2 = CalendarData.Get(t);
+                string off2 = Almanac.Officer(di2.GanZhiDay, di2.GanZhiMonth);
+                bool y2; string zs2 = Almanac.ZhiShen(di2.GanZhiDay, di2.GanZhiMonth, out y2);
+                if (Array.IndexOf(offNames, off2) < 0 || Almanac.Yi(off2) == null || Almanac.Ji(off2) == null ||
+                    Array.IndexOf(zsNames, zs2) < 0 || Almanac.Nayin(di2.GanZhiDay) == null)
+                {
+                    structOk = false; structBad = t.ToString("yyyy-MM-dd") + " " + di2.GanZhiDay + "/" + di2.GanZhiMonth;
+                }
+            }
+            Check(lines, ref fails, "2026 全年黄历字段有效性", structOk, structBad);
+
+            // ---- F1：任务栏停靠几何（合成矩形）----
+            Rectangle scr = Rectangle.FromLTRB(0, 0, 1920, 1080);
+            Check(lines, ref fails, "停靠检测 底部", TaskbarLayout.Detect(Rectangle.FromLTRB(0, 1040, 1920, 1080), scr) == DockEdge.Bottom, "");
+            Check(lines, ref fails, "停靠检测 顶部", TaskbarLayout.Detect(Rectangle.FromLTRB(0, 0, 1920, 48), scr) == DockEdge.Top, "");
+            Check(lines, ref fails, "停靠检测 左侧", TaskbarLayout.Detect(Rectangle.FromLTRB(0, 0, 58, 1080), scr) == DockEdge.Left, "");
+            Check(lines, ref fails, "停靠检测 右侧", TaskbarLayout.Detect(Rectangle.FromLTRB(1862, 0, 1920, 1080), scr) == DockEdge.Right, "");
+            Rectangle gLeft = TaskbarLayout.GuessClockRect(Rectangle.FromLTRB(0, 0, 58, 1080), DockEdge.Left);
+            Check(lines, ref fails, "几何估算 左侧=底部锚定", gLeft.Bottom <= 1080 && gLeft.Top > 900 && gLeft.Left >= 0 && gLeft.Right <= 58, gLeft.ToString());
+            Rectangle gTop = TaskbarLayout.GuessClockRect(Rectangle.FromLTRB(0, 0, 1920, 48), DockEdge.Top);
+            Check(lines, ref fails, "几何估算 顶部=右端+垂直居中", gTop.Right <= 1920 && gTop.Top >= 0 && gTop.Bottom <= 48, gTop.ToString());
+            Rectangle fLeft = TaskbarLayout.FitTarget(new Rectangle(6, 1000, 46, 60),
+                Rectangle.FromLTRB(0, 0, 58, 1080), DockEdge.Left, 120, 64);
+            Check(lines, ref fails, "覆盖定位 左侧=底锚+钳制", fLeft.Bottom <= 1079 && fLeft.Left >= 1, fLeft.ToString());
+            Rectangle fBottom = TaskbarLayout.FitTarget(new Rectangle(1800, 1042, 100, 36),
+                Rectangle.FromLTRB(0, 1040, 1920, 1080), DockEdge.Bottom, 110, 36);
+            Check(lines, ref fails, "覆盖定位 底部=右锚+垂直居中",
+                fBottom.Right <= 1919 && Math.Abs((fBottom.Top + fBottom.Height / 2) - 1060) <= 2, fBottom.ToString());
+            DateTime nf; string nn;
+            bool nfOk = CalendarData.NextFestival(new DateTime(2026, 11, 3), out nf, out nn);
+            Check(lines, ref fails, "下一节日 2026-11-03 → 元旦", nfOk && nn == "元旦" && nf == new DateTime(2027, 1, 1),
+                nn + " " + nf.ToString("yyyy-MM-dd"));
+
             lines.Add("");
             lines.Add(fails == 0 ? "RESULT: ALL PASS (" + lines.Count + " checks)" : "RESULT: " + fails + " FAILURES");
             string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "selftest-result.txt");
@@ -201,6 +268,7 @@ namespace ChinaClock
         public static string SecondTzId = "UTC";     // Windows 时区 Id
         public static string SecondTzLabel = "UTC";
         public static bool ShowWeekNumbers = false;  // 日历左侧周数列（B2）
+        public static bool ShowLocalClock = true;    // 本机时间行（F2）：电脑时区≠北京时间时显示
         public static int ThemeMode = 0;             // 0=跟随系统 1=浅色 2=深色（C1）
         public static string Accent = "#4472C4";     // 强调色（C3）
         public static bool AutoFetchHolidays = true; // B1：每日自动更新假日数据
@@ -231,6 +299,7 @@ namespace ChinaClock
                         case "SecondTzId": if (v.Length > 0) SecondTzId = v; break;
                         case "SecondTzLabel": SecondTzLabel = v; break;
                         case "ShowWeekNumbers": ShowWeekNumbers = GetBool(v, ShowWeekNumbers); break;
+                        case "ShowLocalClock": ShowLocalClock = GetBool(v, ShowLocalClock); break;
                         case "ThemeMode": ThemeMode = GetInt(v, ThemeMode); break;
                         case "Accent": if (v.Length > 0) Accent = v; break;
                         case "AutoFetchHolidays": AutoFetchHolidays = GetBool(v, AutoFetchHolidays); break;
@@ -255,6 +324,7 @@ namespace ChinaClock
                 lines.Add("SecondTzId=" + SecondTzId);
                 lines.Add("SecondTzLabel=" + SecondTzLabel);
                 lines.Add("ShowWeekNumbers=" + ShowWeekNumbers);
+            lines.Add("ShowLocalClock=" + ShowLocalClock);
                 lines.Add("ThemeMode=" + ThemeMode);
                 lines.Add("Accent=" + Accent);
                 lines.Add("AutoFetchHolidays=" + AutoFetchHolidays);
@@ -692,9 +762,10 @@ namespace ChinaClock
     internal static class CalendarData
     {
         private static readonly ChineseLunisolarCalendar Lunar = new ChineseLunisolarCalendar();
-        private static readonly string[] Stems = { "甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸" };
-        private static readonly string[] Branches = { "子", "丑", "寅", "卯", "辰", "巳", "午", "未", "申", "酉", "戌", "亥" };
-        private static readonly string[] Animals = { "鼠", "牛", "虎", "兔", "龙", "蛇", "马", "羊", "猴", "鸡", "狗", "猪" };
+        // 干支三表供 Almanac（黄历）复用（F1）
+        internal static readonly string[] Stems = { "甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸" };
+        internal static readonly string[] Branches = { "子", "丑", "寅", "卯", "辰", "巳", "午", "未", "申", "酉", "戌", "亥" };
+        internal static readonly string[] Animals = { "鼠", "牛", "虎", "兔", "龙", "蛇", "马", "羊", "猴", "鸡", "狗", "猪" };
         private static readonly string[] LunarMonths = { "正月", "二月", "三月", "四月", "五月", "六月", "七月", "八月", "九月", "十月", "冬月", "腊月" };
         private static readonly string[] LunarDays = {
             "初一","初二","初三","初四","初五","初六","初七","初八","初九","初十",
@@ -997,6 +1068,31 @@ namespace ChinaClock
             ToLunar(d, out y, out m, out leap, out day);
         }
 
+        // 最近一个法定/传统节日（含 today 当天）。从 ClockForm 迁来供时钟提示与
+        // 日历详情卡片共用（F1）。仅统计有固定日期的节日，不含普通周末。
+        public static bool NextFestival(DateTime today, out DateTime date, out string name)
+        {
+            DateTime best = DateTime.MaxValue; string bestName = null;
+            for (int y = today.Year; y <= today.Year + 1; y++)
+            {
+                AddCand(ref best, ref bestName, new DateTime(y, 1, 1), "元旦", today);
+                AddCand(ref best, ref bestName, TermDate(y, "清明"), "清明", today);
+                AddCand(ref best, ref bestName, new DateTime(y, 5, 1), "劳动节", today);
+                AddCand(ref best, ref bestName, new DateTime(y, 10, 1), "国庆节", today);
+                try { AddCand(ref best, ref bestName, LunarDate(y, 1, 1), "春节", today); } catch { }
+                try { AddCand(ref best, ref bestName, LunarDate(y, 5, 5), "端午", today); } catch { }
+                try { AddCand(ref best, ref bestName, LunarDate(y, 8, 15), "中秋", today); } catch { }
+            }
+            if (best == DateTime.MaxValue) { date = today; name = null; return false; }
+            date = best; name = bestName; return true;
+        }
+
+        private static void AddCand(ref DateTime best, ref string bestName, DateTime d, string n, DateTime today)
+        {
+            if (d.Date < today || d >= best) return;
+            best = d; bestName = n;
+        }
+
         // 角标原因（N4）：在线数据携带的节日名 > 当天节日 > 内置法定名 > 周末/补班
         public static string BadgeReason(DateTime d, string badge, string festival)
         {
@@ -1072,6 +1168,227 @@ namespace ChinaClock
         }
     }
 
+    // ============================ 黄历 ============================
+
+    // 日期详情卡片（F1）的黄历内容：十二建星宜忌、冲煞、纳音五行、值神黄道黑道。
+    // 全部由干支纯算法推得，零依赖、不联网；采用通行简明黄历口径，供日常参考。
+    internal static class Almanac
+    {
+        // 六十甲子纳音表（两甲子一组，组序 = 干支序 / 2）
+        private static readonly string[] NayinTable = {
+            "海中金", "炉中火", "大林木", "路旁土", "剑锋金", "山头火", "涧下水", "城头土", "白蜡金", "杨柳木",
+            "泉中水", "屋上土", "霹雳火", "松柏木", "长流水", "沙中金", "山下火", "平地木", "壁上土", "金箔金",
+            "覆灯火", "天河水", "大驿土", "钗钏金", "桑柘木", "大溪水", "沙中土", "天上火", "石榴木", "大海水" };
+
+        private static readonly string[] Officers = { "建", "除", "满", "平", "定", "执", "破", "危", "成", "收", "开", "闭" };
+
+        // 十二建星通行简明宜忌
+        private static readonly string[] OfficerYi = {
+            "出行 上任 会友 上书 见工",   // 建
+            "祭祀 祈福 嫁娶 出行 求医",   // 除
+            "祈福 嫁娶 开市 移徙",         // 满
+            "修饰垣墙 平治道涂",           // 平
+            "祭祀 嫁娶 纳采 订盟",         // 定
+            "捕捉 祈福 祭祀 嫁娶",         // 执
+            "破屋 坏垣 求医 治病",         // 破
+            "祭祀 祈福 安床",             // 危
+            "开市 嫁娶 移徙 上任 修造",   // 成
+            "纳财 开市 交易 入学",         // 收
+            "开业 上任 修造 移徙",         // 开
+            "安葬 修坟 筑堤 补垣",         // 闭
+        };
+        private static readonly string[] OfficerJi = {
+            "动土 开仓 嫁娶 造船",         // 建
+            "开市 动土 安葬",             // 除
+            "上任 求医 安葬",             // 满
+            "祈福 嫁娶 开市",             // 平
+            "诉讼 出行 移徙",             // 定
+            "出行 开市 移徙 安葬",         // 执
+            "诸事不宜",                   // 破
+            "登高 行船 出行 嫁娶",         // 危
+            "诉讼 安葬",                   // 成
+            "安葬 出行 破土",             // 收
+            "安葬 破土 诉讼",             // 开
+            "开市 出行 移徙 诉讼",         // 闭
+        };
+
+        // 十二值神（天将）；黄道：青龙 明堂 金匮 天德 玉堂 司命
+        private static readonly string[] ZhiShenNames = { "青龙", "明堂", "天刑", "朱雀", "金匮", "天德", "白虎", "玉堂", "天牢", "玄武", "司命", "勾陈" };
+        private static readonly bool[] ZhiShenYellow = { true, true, false, false, true, true, false, true, false, false, true, false };
+        // 值神起诀：子午月起申、丑未月起戌、寅申月起子、卯酉月起寅、辰戌月起辰、巳亥月起午（下标=月支）
+        private static readonly int[] ZhiShenStart = { 8, 10, 0, 2, 4, 6, 8, 10, 0, 2, 4, 6 };
+        // 煞方按日支三合组：申子辰→南、巳酉丑→东、寅午戌→北、亥卯未→西（下标=日支%4）
+        private static readonly string[] ShaDir = { "南", "东", "北", "西" };
+
+        // 六十甲子序（甲子=0 … 癸亥=59）
+        public static int GanZhiIndex(string ganzhi)
+        {
+            if (ganzhi == null || ganzhi.Length < 2) return -1;
+            int s = Array.IndexOf(CalendarData.Stems, ganzhi[0].ToString());
+            int b = Array.IndexOf(CalendarData.Branches, ganzhi[1].ToString());
+            if (s < 0 || b < 0) return -1;
+            for (int k = 0; k < 6; k++) { int i = s + 10 * k; if (i % 12 == b) return i; }
+            return -1;
+        }
+
+        private static string Gz(int i) { return CalendarData.Stems[i % 10] + CalendarData.Branches[i % 12]; }
+
+        // 纳音五行（如 庚辰 → 白蜡金）
+        public static string Nayin(string ganzhiDay)
+        {
+            int i = GanZhiIndex(ganzhiDay);
+            return i < 0 ? null : NayinTable[i / 2];
+        }
+
+        // 冲煞（如 甲申 → "冲虎（甲寅）· 煞南"）：冲=地支相隔六位（干支序+30），煞方由日支三合组定
+        public static string ChongSha(string ganzhiDay)
+        {
+            int i = GanZhiIndex(ganzhiDay);
+            if (i < 0) return null;
+            int c = (i + 30) % 60;
+            return "冲" + CalendarData.Animals[c % 12] + "（" + Gz(c) + "）· 煞" + ShaDir[(i % 12) % 4];
+        }
+
+        // 十二建星：日支对月支（月建）顺排（如 甲子日 酉月 → 平）
+        public static string Officer(string ganzhiDay, string ganzhiMonth)
+        {
+            int db = Branch(ganzhiDay), mb = Branch(ganzhiMonth);
+            if (db < 0 || mb < 0) return null;
+            return Officers[Mod(db - mb, 12)];
+        }
+
+        public static string Yi(string officer)
+        {
+            int i = Array.IndexOf(Officers, officer ?? "");
+            return i < 0 ? null : OfficerYi[i];
+        }
+
+        public static string Ji(string officer)
+        {
+            int i = Array.IndexOf(Officers, officer ?? "");
+            return i < 0 ? null : OfficerJi[i];
+        }
+
+        // 值神（十二天将）+ 黄道/黑道（如 甲子日 酉月 → 司命，黄道）
+        public static string ZhiShen(string ganzhiDay, string ganzhiMonth, out bool yellow)
+        {
+            yellow = false;
+            int db = Branch(ganzhiDay), mb = Branch(ganzhiMonth);
+            if (db < 0 || mb < 0) return null;
+            int off = Mod(db - ZhiShenStart[mb], 12);
+            yellow = ZhiShenYellow[off];
+            return ZhiShenNames[off];
+        }
+
+        private static int Branch(string ganzhi)
+        {
+            return ganzhi != null && ganzhi.Length >= 2 ? Array.IndexOf(CalendarData.Branches, ganzhi[1].ToString()) : -1;
+        }
+
+        private static int Mod(int x, int m) { x %= m; return x < 0 ? x + m : x; }
+    }
+
+    // ============================ 本机时间 ============================
+
+    // F2：电脑时区不是 UTC+8 时提供本机时间行；相同时区返回 Distinct=false，
+    // 各显示处自动隐藏，避免主时钟与本机行显示两遍同样的时间。
+    internal static class LocalClock
+    {
+        public static bool Distinct
+        {
+            get
+            {
+                try { return TimeZoneInfo.Local.GetUtcOffset(DateTime.Now).TotalMinutes != 480; }
+                catch { return false; }
+            }
+        }
+
+        // 面板头部大时间右侧（紧凑）
+        public static string ShortText { get { return "本地 " + DateTime.Now.ToString("HH:mm"); } }
+
+        // 悬停提示（完整）
+        public static string PanelText { get { return "本地时间 " + DateTime.Now.ToString("HH:mm"); } }
+
+        // 三处显示统一开关：设置开关 + 时区确实不同
+        public static bool Enabled { get { return Settings.ShowLocalClock && Distinct; } }
+    }
+
+    // ============================ 任务栏停靠几何 ============================
+
+    // 停靠边检测与时钟定位的纯几何函数（--selftest 用合成矩形校验四边）。
+    // Windows 10 原生支持上下左右停靠；Windows 11 需 ExplorerPatcher 等工具，
+    // 但 Shell_TrayWnd 的窗口矩形在任意停靠下都真实可用，检测即以此为准。
+    internal enum DockEdge { Bottom = 0, Top = 1, Left = 2, Right = 3 }
+
+    internal static class TaskbarLayout
+    {
+        // --pretend-dock:left|top|right 调试入口：强制按指定停靠边定位（null=自动检测）
+        internal static DockEdge? PretendDock;
+
+        [DllImport("user32.dll")] private static extern IntPtr FindWindow(string cls, string title);
+        [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr h, out RECT r);
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT { public int Left, Top, Right, Bottom; }
+
+        // 当前任务栏矩形 + 停靠边；找不到任务栏返回 false（dock 回退 Bottom）
+        internal static bool Current(out Rectangle tray, out DockEdge dock)
+        {
+            tray = Rectangle.Empty;
+            dock = PretendDock ?? DockEdge.Bottom;
+            IntPtr trayHwnd = FindWindow("Shell_TrayWnd", null);
+            if (trayHwnd == IntPtr.Zero) return false;
+            RECT tr;
+            GetWindowRect(trayHwnd, out tr);
+            tray = Rectangle.FromLTRB(tr.Left, tr.Top, tr.Right, tr.Bottom);
+            if (PretendDock.HasValue) return true;
+            dock = Detect(tray, Screen.PrimaryScreen.Bounds);
+            return true;
+        }
+
+        // 纯函数：窄条为垂直停靠（左/右），再按贴哪条屏幕边定左右；横条同理分顶底
+        public static DockEdge Detect(Rectangle tray, Rectangle screen)
+        {
+            bool vertical = tray.Width < tray.Height;
+            if (vertical)
+                return (tray.Left - screen.Left) <= (screen.Right - tray.Right) ? DockEdge.Left : DockEdge.Right;
+            return (tray.Top - screen.Top) <= (screen.Bottom - tray.Bottom) ? DockEdge.Top : DockEdge.Bottom;
+        }
+
+        // 纯函数：无 UIA 时的系统时钟几何估算。
+        // 水平停靠（顶/底）：右端锚定、垂直居中（公式对顶栏天然成立）；
+        // 垂直停靠（左/右）：水平居中、底部锚定（系统时钟在侧边栏底部）。
+        public static Rectangle GuessClockRect(Rectangle tray, DockEdge dock)
+        {
+            float k = Math.Min(tray.Width, tray.Height) / 48f;
+            int w = (int)(92 * k), h = (int)(42 * k), m = (int)(10 * k);
+            if (dock == DockEdge.Left || dock == DockEdge.Right)
+            {
+                // 窄栏：估算宽度超过栏宽时收窄并钳在栏内（仅兜底初值，UIA 结果稍后精调）
+                int x = tray.Left + (tray.Width - w) / 2;
+                if (w > tray.Width - 4) { w = Math.Max(20, tray.Width - 8); x = tray.Left + 4; }
+                return new Rectangle(x, tray.Bottom - m - h, w, h);
+            }
+            return new Rectangle(tray.Right - m - w, tray.Top + (tray.Height - h) / 2, w, h);
+        }
+
+        // 纯函数：覆盖窗目标位置。水平停靠=右锚+垂直居中（原逻辑，加边钳制）；
+        // 垂直停靠=底锚+水平居中；均尽量钳制在任务栏矩形内。
+        public static Rectangle FitTarget(Rectangle r, Rectangle tray, DockEdge dock, int w, int h)
+        {
+            if (dock == DockEdge.Left || dock == DockEdge.Right)
+            {
+                int bottom = Math.Min(r.Bottom + 4, tray.Bottom - 1);
+                int x = r.X + r.Width / 2 - w / 2;
+                x = Math.Max(tray.Left + 1, Math.Min(x, tray.Right - w - 1));
+                return new Rectangle(x, bottom - h, w, h);
+            }
+            int right = Math.Min(r.Right + 4, tray.Right - 1);
+            int y = r.Top + r.Height / 2 - h / 2;
+            y = Math.Max(tray.Top + 1, Math.Min(y, tray.Bottom - h - 1));
+            return new Rectangle(right - w, y, w, h);
+        }
+    }
+
     // ============================ 日历面板 ============================
 
     internal sealed class CalendarPanel : Form
@@ -1098,6 +1415,20 @@ namespace ChinaClock
         private bool _editOpen;       // 编辑期间面板不因失焦关闭
         private List<AgendaItem> _listItems; // 近期日程列表数据（N2）
         private int _listScroll;             // 列表滚过的行数
+        private bool _hasLocal;              // 头部本机时间（F2，时区≠北京时间才有，画在大时间右侧）
+        private int _calW;                   // 月历区宽度（卡片开合前的面板宽）
+        private int _calX;                   // 月历区在窗内的 x 偏移（详情卡片开在另一侧时 > 0）
+        private bool _cardOpen;              // 日期详情卡片（F1，优效日历式侧弹卡）
+        private DateTime _cardDay;
+        private int _cardSide = -1;          // 卡片展开方向：-1=左侧（默认） 1=右侧（面板停靠左下时）
+        private int _cardW;                  // 卡片宽（Scale 后）
+        private Rectangle _cardRect;         // 卡片矩形（窗内坐标；收起时 Empty）
+        private Rectangle _btnCardPrev, _btnCardNext, _btnCardClose, _btnCardEdit;
+        private int _cardHot;                // 卡片悬停：0无 1=‹ 2=› 3=× 4=编辑日程
+        // 日格点击节奏：短时间重复点同一天 = 连点浏览，卡片保持打开不闪收
+        // （>650ms 的从容第二次单击才收起）。
+        private DateTime _lastGridClick = DateTime.MinValue;
+        private DateTime _lastGridClickDay = DateTime.MinValue;
 
         // 配色由 PanelPalette 按主题/强调色生成（C1/C3）
         private PanelPalette P;
@@ -1141,18 +1472,47 @@ namespace ChinaClock
             _offDate = Scale(12) + hTime + Scale(4);
             _offInfo = _offDate + hDate + Scale(2);
             _headerH = _offInfo + hInfo + Scale(6);
+            _hasLocal = LocalClock.Enabled; // F2：本机时间画在头部大时间右侧（时区不同才显示）
 
             _pad = Scale(14); _titleH = Scale(32); _weekH = Scale(28);
             _cellH = Scale(60); _cellW = Scale(58); _footerH = Scale(40);
             _wkCol = Settings.ShowWeekNumbers ? Scale(30) : 0;
             int w = _pad * 2 + _wkCol + _cellW * 7;
+            _calW = w; // 月历区宽度
+            if (_cardW == 0) _cardW = Scale(212); // 详情卡片宽度（窗内常驻预留）
+            int gap = Scale(8);
+            int fullW = _calW + gap + _cardW; // 窗口常驻全宽 = 月历 + 透明缝隙 + 卡片
             int h = _pad + _headerH + _titleH + _weekH + _cellH * 6 + _footerH + Scale(8);
-            Size = new Size(w, h);
-            using (GraphicsPath p = RoundedPath(new Rectangle(0, 0, w - 1, h - 1), Scale(10)))
-                Region = new Region(p);
+            Size = new Size(fullW, h);
 
+            // F1：窗口自创建起常驻全尺寸，月历固定占窗内一侧、卡片预留另一侧。
+            // 开合只切换透明分区（Region），不改窗口位置/大小——反复 resize/移动
+            // 正是此前"单击日期闪烁"的根源（卡片区域反复露底/覆盖）。
+            // 关闭时卡片区不在 Region 内：不可见、鼠标点击穿透。
+            Rectangle tray; DockEdge dock;
+            TaskbarLayout.Current(out tray, out dock);
+            _cardSide = dock == DockEdge.Left ? 1 : -1; // 卡片朝屏幕中央：左停靠→右侧，其余→左侧
+            if (_cardSide < 0)
+            {
+                _calX = _cardW + gap;                          // 卡片在左：月历靠右
+                _cardRect = new Rectangle(0, 0, _cardW, h);
+            }
+            else
+            {
+                _calX = 0;                                      // 卡片在右：月历靠左
+                _cardRect = new Rectangle(_calW + gap, 0, _cardW, h);
+            }
+            Region = new Region(RoundedPath(new Rectangle(_calX, 0, _calW - 1, h - 1), Scale(10)));
+
+            // 月历区锚到时钟所在角（窗口额外带上卡片区宽度，月历可见位置与旧版一致）
             var wa = Screen.PrimaryScreen.WorkingArea;
-            Location = new Point(wa.Right - w - Scale(10), wa.Bottom - h - Scale(8));
+            Point loc;
+            if (dock == DockEdge.Top) loc = new Point(wa.Right - fullW - Scale(10), wa.Top + Scale(8));
+            else if (dock == DockEdge.Left) loc = new Point(wa.Left + Scale(10), wa.Bottom - h - Scale(8));
+            else loc = new Point(wa.Right - fullW - Scale(10), wa.Bottom - h - Scale(8)); // 底/右停靠
+            loc.X = Math.Max(wa.Left, Math.Min(loc.X, wa.Right - fullW));
+            loc.Y = Math.Max(wa.Top, Math.Min(loc.Y, wa.Bottom - h));
+            Location = loc;
 
             DateTime now = Now();
             _selected = now.Date;
@@ -1194,7 +1554,8 @@ namespace ChinaClock
         {
             base.OnKeyDown(e);
             if (e.KeyCode != Keys.Escape) return;
-            if (_pickMode != 0) { _pickMode = 0; Invalidate(); } // 先收起年月选择器，再关面板
+            if (_cardOpen) { CloseCard(); return; }              // 先收详情卡片（F1）
+            if (_pickMode != 0) { _pickMode = 0; Invalidate(); } // 再收起年月选择器，最后关面板
             else Close();
         }
 
@@ -1209,7 +1570,9 @@ namespace ChinaClock
         {
             base.OnMouseClick(e);
             if (e.Button != MouseButtons.Left) return;
-            Point p = e.Location;
+            Point pRaw = e.Location;
+            if (_cardOpen && _cardRect.Contains(pRaw)) { CardClick(pRaw); return; } // F1：卡片内点击
+            Point p = pRaw; // 月历矩形全部为窗内坐标（含 _calX），命中无需再平移
             if (_btnTitlePrev.Contains(p)) { StepMonth(-1); return; }
             if (_btnTitleNext.Contains(p)) { StepMonth(1); return; }
             if (_titleRect.Contains(p))
@@ -1244,16 +1607,13 @@ namespace ChinaClock
             {
                 int col = Math.Max(0, Math.Min(6, (p.X - _gridRect.X) / _cellW));
                 int row = Math.Max(0, Math.Min(5, (p.Y - _gridRect.Y) / _cellH));
-                DateTime d = GridStart().AddDays(row * 7 + col).Date;
-                if (e.Clicks >= 2) { OpenAgenda(d); return; } // B4：双击编辑日程
-                _selected = d;
-                Invalidate();
+                // 所有日期格点击（含双击的第二击）统一走浏览逻辑（F1：连点稳定跟随）
+                HandleGridClick(GridStart().AddDays(row * 7 + col).Date);
             }
         }
 
-        // B4：双击日期打开日程编辑窗。
-        // 双击的第二次点击走 WM_LBUTTONDBLCLK → MouseDown(Clicks=2)，MouseClick 不一定带 2，
-        // 所以在这里检测（OnMouseClick 里的 e.Clicks>=2 分支保留兜底，OpenAgenda 幂等）
+        // 双击的第二击走 WM_LBUTTONDBLCLK → MouseDown(Clicks=2)，MouseClick 不一定触发，
+        // 在此兜底汇入 HandleGridClick；与单击一样只做浏览跟随（幂等，无编辑路径）
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
@@ -1263,14 +1623,40 @@ namespace ChinaClock
             {
                 int col = Math.Max(0, Math.Min(6, (p.X - _gridRect.X) / _cellW));
                 int row = Math.Max(0, Math.Min(5, (p.Y - _gridRect.Y) / _cellH));
-                OpenAgenda(GridStart().AddDays(row * 7 + col).Date);
+                HandleGridClick(GridStart().AddDays(row * 7 + col).Date);
             }
+        }
+
+        // 日格点击统一入口（含系统判定为"双击"的第二击）：全部按浏览处理——选中
+        // 并让详情卡片跟随。日期格不响应双击编辑（优效日历同款交互）：连点的第一组
+        // 两连击与"从容双击编辑"在系统层面不可区分，保留双击必然连点误弹编辑窗；
+        // 编辑入口收敛到卡片上的"编辑日程…"按钮，任何点击节奏下都不闪编辑窗。
+        private void HandleGridClick(DateTime d)
+        {
+            bool rapidRepeat = DateTime.Now.Subtract(_lastGridClick).TotalMilliseconds < 650
+                && _lastGridClickDay == d;
+            _lastGridClick = DateTime.Now;
+            _lastGridClickDay = d;
+            _selected = d;
+            if (!rapidRepeat && _cardOpen && _cardDay == d) CloseCard();
+            else OpenCard(d);
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
-            int hot = HitHot(e.Location);
+            Point pRaw = e.Location;
+            if (_cardOpen && _cardRect.Contains(pRaw)) // F1：卡片按钮悬停
+            {
+                int hotCard = _btnCardPrev.Contains(pRaw) ? 1 : _btnCardNext.Contains(pRaw) ? 2
+                    : _btnCardClose.Contains(pRaw) ? 3 : _btnCardEdit.Contains(pRaw) ? 4 : 0;
+                if (hotCard != _cardHot) { _cardHot = hotCard; Invalidate(); }
+                ClearDayTip();
+                Cursor = hotCard > 0 ? Cursors.Hand : Cursors.Default;
+                return;
+            }
+            if (_cardHot != 0) { _cardHot = 0; Invalidate(); }
+            int hot = HitHot(pRaw); // 月历矩形为窗内坐标（含 _calX），直接命中
             if (hot != _hot) { _hot = hot; Invalidate(); }
             if (_pickMode == 0 && hot >= 100)
             {
@@ -1332,10 +1718,101 @@ namespace ChinaClock
             catch { }
         }
 
+        // ---- F1：日期详情卡片（优效日历式侧弹卡）----
+
+        // 打开/刷新某天的详情卡片（--day-detail 视觉入口也会调用）。
+        // 观感是月历旁弹出一张独立卡片（透明缝隙分隔）；仍是同一窗口，卡片开合
+        // 只切换透明分区，月历位置纹丝不动，焦点/失焦/Esc 行为不变。
+        public void OpenCard(DateTime d)
+        {
+            _cardDay = d;
+            _selected = d;
+            if (_cardOpen) { Invalidate(); return; }
+            _cardOpen = true;
+            ApplyCardLayout();
+        }
+
+        private void CloseCard()
+        {
+            if (!_cardOpen) return;
+            _cardOpen = false;
+            _cardHot = 0;
+            ApplyCardLayout();
+        }
+
+        // 卡片开合：只切换透明分区（Region）。窗口位置/大小自创建起永不变
+        // （构造器已常驻预留卡片区），反复 resize/移动造成的露底闪烁随之根除。
+        // 关闭时卡片区不在 Region 内：不可见、点击穿透。
+        private void ApplyCardLayout()
+        {
+            int h = ClientSize.Height;
+            using (GraphicsPath p1 = RoundedPath(new Rectangle(_calX, 0, _calW - 1, h - 1), Scale(10)))
+            using (GraphicsPath p2 = _cardOpen
+                ? RoundedPath(new Rectangle(_cardRect.X, _cardRect.Y, _cardRect.Width - 1, h - 1), Scale(10))
+                : null)
+            {
+                Region r = new Region(p1);
+                if (p2 != null) r.Union(p2);
+                Region old = Region;
+                Region = r;
+                if (old != null) old.Dispose();
+            }
+            Invalidate();
+        }
+
+        private void CardClick(Point p)
+        {
+            if (_btnCardClose.Contains(p)) { CloseCard(); return; }
+            if (_btnCardPrev.Contains(p)) { StepCard(-1); return; }
+            if (_btnCardNext.Contains(p)) { StepCard(1); return; }
+            if (_btnCardEdit.Contains(p)) { OpenAgenda(_cardDay); return; }
+            _cardHot = 0; // 点卡片空白不关闭，避免误触
+            Invalidate();
+        }
+
+        // 卡片 ‹ › 逐日翻看；跨月时月历跟着翻页
+        private void StepCard(int dir)
+        {
+            DateTime t = _cardDay.AddDays(dir);
+            if (t.Year < 1901 || t.Year > 2100) return;
+            _cardDay = t;
+            _selected = t;
+            if (t.Year != _viewMonth.Year || t.Month != _viewMonth.Month)
+                _viewMonth = new DateTime(t.Year, t.Month, 1);
+            Invalidate();
+        }
+
+        // 假期行：当天在假期区间内 = "国庆节 第2天/共8天"；否则距下一个法定/传统节日倒计时
+        private string HolidayLine(DateTime d)
+        {
+            Dictionary<DateTime, string> feed = HolidayFeed.Data;
+            if (feed != null && feed.ContainsKey(d) && feed[d] == "休")
+            {
+                DateTime start = d, end = d;
+                while (feed.ContainsKey(start.AddDays(-1)) && feed[start.AddDays(-1)] == "休")
+                    start = start.AddDays(-1);
+                while (feed.ContainsKey(end.AddDays(1)) && feed[end.AddDays(1)] == "休")
+                    end = end.AddDays(1);
+                int total = (int)(end - start).TotalDays + 1;
+                int nth = (int)(d - start).TotalDays + 1;
+                CalendarData.DayInfo si = CalendarData.Get(start);
+                string name = CalendarData.BadgeReason(start, "休", si.Festival) ?? "假期";
+                return name + " 第" + nth + "天 / 共" + total + "天";
+            }
+            DateTime hd; string hn;
+            if (CalendarData.NextFestival(d, out hd, out hn))
+            {
+                int cd = (int)(hd - d).TotalDays;
+                return cd == 0 ? "今天 " + hn : "距 " + hn + " 还有 " + cd + " 天";
+            }
+            return null;
+        }
+
         protected override void OnMouseLeave(EventArgs e)
         {
             base.OnMouseLeave(e);
             if (_hot != -1) { _hot = -1; Invalidate(); }
+            if (_cardHot != 0) { _cardHot = 0; Invalidate(); }
             ClearDayTip();
             Cursor = Cursors.Default;
         }
@@ -1470,10 +1947,11 @@ namespace ChinaClock
 
         // ---- 年月选择视图几何（与 DrawPickCell 的绘制严格一致）----
 
-        // 格子区占满星期表头 + 网格区（层级名由顶部标题栏承担，不再另设头部行）
+        // 格子区占满星期表头 + 网格区（层级名由顶部标题栏承担，不再另设头部行）。
+        // 窗内坐标含 _calX（详情卡片开着时月历区整体右移，F1）
         private Rectangle PickArea()
         {
-            return new Rectangle(_pad, _pad + _headerH + _titleH, _cellW * 7, _weekH + _cellH * 6);
+            return new Rectangle(_calX + _pad, _pad + _headerH + _titleH, _cellW * 7, _weekH + _cellH * 6);
         }
 
         // 12 个格子（4 列 × 3 行）：选月视图=1~12月；选年视图=十年区前一年~后一年（两端灰显）
@@ -1500,15 +1978,34 @@ namespace ChinaClock
             base.OnPaint(e);
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            int w = ClientSize.Width;
+            int w = _calW; // 月历区宽度（详情卡片开着时窗体更宽，月历坐标整体平移 _calX）
 
+            // F1：月历与卡片各自画圆角边框，中间是透明缝隙（Region 已抠空）。
+            // 注意：TextRenderer(GDI) 不吃 GDI+ 世界变换，所以月历内容一律用
+            // "构造矩形时直接 + _calX" 的窗内坐标，不用 TranslateTransform。
             using (Pen pen = new Pen(P.Border))
-                g.DrawPath(pen, RoundedPath(new Rectangle(0, 0, w - 1, ClientSize.Height - 1), Scale(10)));
+            {
+                g.DrawPath(pen, RoundedPath(new Rectangle(_calX, 0, w - 1, ClientSize.Height - 1), Scale(10)));
+                if (_cardOpen)
+                    g.DrawPath(pen, RoundedPath(
+                        new Rectangle(_cardRect.X, _cardRect.Y, _cardRect.Width - 1, ClientSize.Height - 1), Scale(10)));
+            }
 
-            // 头部：中国时间 + 选中日期 + 农历干支（三行间距按字体行高排布）
+            // 头部：中国时间（右侧附本机时间，F2）+ 选中日期 + 农历干支（行距按字体行高排布）
             CalendarData.DayInfo di = CalendarData.Get(_selected);
-            int x = _pad, y = _pad;
-            TextRenderer.DrawText(g, Now().ToString("HH:mm:ss"), _fTime, new Point(x, y + Scale(12)), _cText);
+            int x = _calX + _pad, y = _pad;
+            string timeText = Now().ToString("HH:mm:ss");
+            TextRenderer.DrawText(g, timeText, _fTime, new Point(x, y + Scale(12)), _cText);
+            if (_hasLocal)
+            {
+                // 本机时间贴在大时间右下角（底部基线对齐），小字弱化不抢焦点
+                Size tsz = TextRenderer.MeasureText(timeText, _fTime);
+                string localText = LocalClock.ShortText; // "本机 HH:mm"
+                Size lsz = TextRenderer.MeasureText(localText, _fInfo);
+                int lx = x + tsz.Width + Scale(10);
+                int ly = y + Scale(12) + tsz.Height - lsz.Height - Scale(1);
+                TextRenderer.DrawText(g, localText, _fInfo, new Point(lx, ly), _cSubLunar);
+            }
             string dateLine = _selected.ToString("yyyy年M月d日 ") + WeekFull[(int)_selected.DayOfWeek]
                 + (_selected == Now().Date ? "　今天" : "");
             TextRenderer.DrawText(g, dateLine, _fDate, new Point(x, y + _offDate), _cText);
@@ -1520,8 +2017,8 @@ namespace ChinaClock
             // 标题栏：‹ 标题 ›。标题即当前层级名（月历/选月/选年），点击逐级切换；
             // ‹ › 按当前层级翻页——与 Windows 自带日历、WinUI CalendarView、v-calendar 一致
             int ty = _pad + _headerH;
-            _btnTitlePrev = new Rectangle(_pad, ty, Scale(32), _titleH);
-            _btnTitleNext = new Rectangle(_pad + _wkCol + _cellW * 7 - Scale(32), ty, Scale(32), _titleH);
+            _btnTitlePrev = new Rectangle(_calX + _pad, ty, Scale(32), _titleH);
+            _btnTitleNext = new Rectangle(_calX + _pad + _wkCol + _cellW * 7 - Scale(32), ty, Scale(32), _titleH);
             _titleRect = new Rectangle(_btnTitlePrev.Right + Scale(2), ty,
                 _btnTitleNext.Left - _btnTitlePrev.Right - Scale(4), _titleH);
             string title = _pickMode == 0 ? _viewMonth.ToString("yyyy年M月")
@@ -1534,27 +2031,27 @@ namespace ChinaClock
             DrawGlyphButton(g, _btnTitlePrev, "‹", _hot == 1);
             DrawGlyphButton(g, _btnTitleNext, "›", _hot == 2);
 
-            // 中部：星期表头 + 月历网格；或年月选择视图
+            // 中部：星期表头 + 月历网格；或年月选择视图（矩形均为窗内坐标，含 _calX）
             int gy = _pad + _headerH + _titleH;
-            _gridRect = new Rectangle(_pad + _wkCol, gy + _weekH, _cellW * 7, _cellH * 6);
+            _gridRect = new Rectangle(_calX + _pad + _wkCol, gy + _weekH, _cellW * 7, _cellH * 6);
             if (_pickMode == 0)
             {
                 // 星期表头（周一起始）
                 for (int i = 0; i < 7; i++)
                 {
-                    Rectangle r = new Rectangle(_pad + _wkCol + _cellW * i, gy, _cellW, _weekH);
+                    Rectangle r = new Rectangle(_calX + _pad + _wkCol + _cellW * i, gy, _cellW, _weekH);
                     TextRenderer.DrawText(g, WeekNames[i], _fWeek, r, i >= 5 ? _cRed : _cSub,
                         TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
                 }
                 // 周数列（B2）：每行取该行周四的 ISO 周数
                 if (_wkCol > 0)
                 {
-                    TextRenderer.DrawText(g, "周", _fSmall, new Rectangle(_pad, gy, _wkCol - Scale(6), _weekH), _cSub,
+                    TextRenderer.DrawText(g, "周", _fSmall, new Rectangle(_calX + _pad, gy, _wkCol - Scale(6), _weekH), _cSub,
                         TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
                     DateTime start = GridStart();
                     for (int row = 0; row < 6; row++)
                     {
-                        Rectangle rc = new Rectangle(_pad, _gridRect.Y + _cellH * row, _wkCol - Scale(6), _cellH);
+                        Rectangle rc = new Rectangle(_calX + _pad, _gridRect.Y + _cellH * row, _wkCol - Scale(6), _cellH);
                         TextRenderer.DrawText(g, CalendarData.IsoWeek(start.AddDays(row * 7 + 3)).ToString(),
                             _fSmall, rc, _cSub,
                             TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
@@ -1571,10 +2068,153 @@ namespace ChinaClock
 
             // 底部：近期日程（N2） + 回到今天
             int fy = _gridRect.Bottom + Scale(6);
-            _btnAgenda = new Rectangle(_pad, fy, Scale(84), Scale(28));
-            _btnToday = new Rectangle(w - _pad - Scale(80), fy, Scale(80), Scale(28));
+            _btnAgenda = new Rectangle(_calX + _pad, fy, Scale(84), Scale(28));
+            _btnToday = new Rectangle(_calX + w - _pad - Scale(80), fy, Scale(80), Scale(28));
             DrawMiniButton(g, _btnAgenda, "近期日程", _hot == 5);
             DrawMiniButton(g, _btnToday, "回到今天", _hot == 4);
+
+            if (_cardOpen) DrawCard(g); // F1：详情卡片（窗内坐标）
+        }
+
+        // F1：日期详情卡片主体。头部已有 时间/日期/农历干支，卡片不重复，内容：
+        // 大字日期、节日/节气、休班原因、假期区间/倒计时、当天日程（可编辑）、
+        // 黄历（宜忌/冲煞/纳音/建星/值神）、年度进度（第几周/第几天/进度%）
+        private void DrawCard(Graphics g)
+        {
+            DateTime d = _cardDay;
+            CalendarData.DayInfo di = CalendarData.Get(d);
+            int x = _cardRect.X, cw = _cardRect.Width;
+            int pad = Scale(14);
+            int rx = x + pad, rw = cw - pad * 2;
+            int y = _cardRect.Y + pad;
+
+            // 右上角：‹ › ×（逐日翻看 / 关闭）
+            _btnCardClose = new Rectangle(x + cw - Scale(26), _cardRect.Y + Scale(4), Scale(22), Scale(22));
+            _btnCardNext = new Rectangle(_btnCardClose.Left - Scale(26), _btnCardClose.Y, Scale(22), Scale(22));
+            _btnCardPrev = new Rectangle(_btnCardNext.Left - Scale(26), _btnCardClose.Y, Scale(22), Scale(22));
+            DrawGlyphButton(g, _btnCardPrev, "‹", _cardHot == 1);
+            DrawGlyphButton(g, _btnCardNext, "›", _cardHot == 2);
+            DrawGlyphButton(g, _btnCardClose, "×", _cardHot == 3);
+
+            // 大字日期（日 + 月 + 星期）
+            y += Scale(4);
+            TextRenderer.DrawText(g, d.Day.ToString(), _fTime, new Rectangle(rx, y, Scale(52), Scale(38)),
+                _cText, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+            TextRenderer.DrawText(g, d.ToString("M月"), _fDate,
+                new Rectangle(rx + Scale(58), y + Scale(5), rw - Scale(58), Scale(18)),
+                _cText, TextFormatFlags.Left | TextFormatFlags.Top);
+            TextRenderer.DrawText(g, WeekFull[(int)d.DayOfWeek], _fDate,
+                new Rectangle(rx + Scale(58), y + Scale(23), rw - Scale(58), Scale(16)),
+                _cSub, TextFormatFlags.Left | TextFormatFlags.Top);
+            y += Scale(46);
+
+            // 农历 + 生肖年
+            TextRenderer.DrawText(g, "农历 " + di.LunarFullText + " · " + di.GanZhiYear + di.Animal + "年", _fInfo,
+                new Rectangle(rx, y, rw, Scale(16)), _cSub,
+                TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+            y += Scale(21);
+
+            // 节日 / 节气
+            if (di.Festival != null || di.TermName != null)
+            {
+                bool isFest = di.Festival != null;
+                TextRenderer.DrawText(g, isFest ? di.Festival : di.TermName, _fInfo,
+                    new Rectangle(rx, y, rw, Scale(16)), isFest ? _cRed : _cBlue);
+                y += Scale(21);
+            }
+
+            // 休/班原因（"周末"这类日常角标不占行）
+            string reason = CalendarData.BadgeReason(d, di.Badge, di.Festival);
+            if (reason != null && reason != "周末")
+            {
+                bool work = di.Badge == "班";
+                TextRenderer.DrawText(g, reason + (work ? "（补班）" : "（休）"), _fInfo,
+                    new Rectangle(rx, y, rw, Scale(16)), work ? _cWorkFg : _cRestFg);
+                y += Scale(21);
+            }
+
+            // 假期区间 / 倒计时
+            string hol = HolidayLine(d);
+            if (hol != null)
+            {
+                TextRenderer.DrawText(g, hol, _fInfo, new Rectangle(rx, y, rw, Scale(16)), _cAccent);
+                y += Scale(21);
+            }
+
+            DrawSep(g, rx, y, rw);
+            y += Scale(11);
+
+            // 当天日程（最多 4 行，超出折叠）
+            TextRenderer.DrawText(g, "日程", _fSmall, new Rectangle(rx, y, rw, Scale(15)), _cAccent);
+            y += Scale(21);
+            List<AgendaItem> items = AgendaStore.On(d);
+            if (items.Count == 0)
+            {
+                TextRenderer.DrawText(g, "暂无日程，点下方按钮添加", _fSmall,
+                    new Rectangle(rx, y, rw, Scale(15)), _cSubLunar);
+                y += Scale(21);
+            }
+            else
+            {
+                int shown = 0;
+                foreach (AgendaItem it in items)
+                {
+                    if (shown >= 4)
+                    {
+                        TextRenderer.DrawText(g, "… 共 " + items.Count + " 项", _fSmall,
+                            new Rectangle(rx, y, rw, Scale(15)), _cSub);
+                        y += Scale(20);
+                        break;
+                    }
+                    string row = (it.Time != null ? it.Time + " " : "") + it.Text;
+                    TextRenderer.DrawText(g, "· " + row, _fWeek, new Rectangle(rx, y, rw, Scale(18)),
+                        _cText, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                    y += Scale(22);
+                    shown++;
+                }
+            }
+            _btnCardEdit = new Rectangle(rx, y, Scale(96), Scale(26));
+            DrawMiniButton(g, _btnCardEdit, "编辑日程…", _cardHot == 4);
+            y += Scale(36);
+            DrawSep(g, rx, y, rw);
+            y += Scale(11);
+
+            // 黄历
+            TextRenderer.DrawText(g, "黄历", _fSmall, new Rectangle(rx, y, rw, Scale(15)), _cAccent);
+            y += Scale(21);
+            string officer = Almanac.Officer(di.GanZhiDay, di.GanZhiMonth);
+            TextRenderer.DrawText(g, "宜  " + Almanac.Yi(officer), _fInfo,
+                new Rectangle(rx, y, rw, Scale(16)), _cText,
+                TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+            y += Scale(21);
+            TextRenderer.DrawText(g, "忌  " + Almanac.Ji(officer), _fInfo,
+                new Rectangle(rx, y, rw, Scale(16)), _cRed,
+                TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+            y += Scale(21);
+            TextRenderer.DrawText(g, Almanac.ChongSha(di.GanZhiDay), _fInfo,
+                new Rectangle(rx, y, rw, Scale(16)), _cSub);
+            y += Scale(21);
+            bool yellow;
+            string zs = Almanac.ZhiShen(di.GanZhiDay, di.GanZhiMonth, out yellow);
+            TextRenderer.DrawText(g, Almanac.Nayin(di.GanZhiDay) + " · " + officer + "日 · " + zs + (yellow ? "（黄道）" : "（黑道）"),
+                _fInfo, new Rectangle(rx, y, rw, Scale(16)), _cSub,
+                TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+            y += Scale(21);
+            DrawSep(g, rx, y, rw);
+            y += Scale(11);
+
+            // 年度进度（优效日历同款信息）
+            int daysInYear = DateTime.IsLeapYear(d.Year) ? 366 : 365;
+            int pct = (int)Math.Round(d.DayOfYear * 100.0 / daysInYear);
+            TextRenderer.DrawText(g, "第" + CalendarData.IsoWeek(d) + "周 · 全年第" + d.DayOfYear + "天 · 年进度 " + pct + "%",
+                _fSmall, new Rectangle(rx, y, rw, Scale(15)), _cSubLunar,
+                TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+        }
+
+        private void DrawSep(Graphics g, int x, int y, int w)
+        {
+            using (Pen p = new Pen(_cBorder))
+                g.DrawLine(p, x, y + Scale(3), x + w, y + Scale(3));
         }
 
         // 年月选择视图：选月=当年 12 个月；选年=十年区 12 年（层级名在顶部标题栏）
@@ -2055,7 +2695,7 @@ namespace ChinaClock
     internal sealed class SettingsForm : Form
     {
         private readonly ClockForm _clock;
-        private CheckBox _cbSeconds, _cbWeekday, _cbDateLine, _cbTz2, _cbWeekNum, _cbAutoFetch, _cbAutoStart;
+        private CheckBox _cbSeconds, _cbWeekday, _cbDateLine, _cbLocal, _cbTz2, _cbWeekNum, _cbAutoFetch, _cbAutoStart;
         private TextBox _tbFormat, _tbTzLabel;
         private ComboBox _cboTz;
         private RadioButton _rbFollow, _rbLight, _rbDark;
@@ -2093,7 +2733,7 @@ namespace ChinaClock
             MinimizeBox = false;
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.Manual;
-            ClientSize = new Size(474, 566);
+            ClientSize = new Size(474, 598);
             BackColor = Color.White;
             Font = new Font("Microsoft YaHei UI", 9F);
             var wa = Screen.PrimaryScreen.WorkingArea;
@@ -2103,7 +2743,7 @@ namespace ChinaClock
             GroupBox g1 = new GroupBox();
             g1.Text = "时钟显示";
             g1.Location = new Point(12, 10);
-            g1.Size = new Size(450, 152);
+            g1.Size = new Size(450, 184);
             _cbSeconds = new CheckBox();
             _cbSeconds.Text = "显示秒"; _cbSeconds.Location = new Point(16, 26); _cbSeconds.AutoSize = true; _cbSeconds.Checked = Settings.ShowSeconds;
             _cbWeekday = new CheckBox();
@@ -2123,13 +2763,15 @@ namespace ChinaClock
             _cboTz.SelectedIndex = IndexOfTz(Settings.SecondTzId);
             _tbTzLabel = new TextBox();
             _tbTzLabel.Location = new Point(322, 110); _tbTzLabel.Size = new Size(110, 24); _tbTzLabel.Text = Settings.SecondTzLabel;
-            g1.Controls.AddRange(new Control[] { _cbSeconds, _cbWeekday, _cbDateLine, l1, _tbFormat, _cbTz2, _cboTz, _tbTzLabel });
+            _cbLocal = new CheckBox();
+            _cbLocal.Text = "显示本地时间（电脑时区≠北京时间时，面板顶部与悬停提示显示）"; _cbLocal.Location = new Point(16, 148); _cbLocal.AutoSize = true; _cbLocal.Checked = Settings.ShowLocalClock;
+            g1.Controls.AddRange(new Control[] { _cbSeconds, _cbWeekday, _cbDateLine, l1, _tbFormat, _cbTz2, _cboTz, _tbTzLabel, _cbLocal });
             Controls.Add(g1);
 
             // ---- 日历外观 ----
             GroupBox g2 = new GroupBox();
             g2.Text = "日历外观";
-            g2.Location = new Point(12, 170);
+            g2.Location = new Point(12, 202);
             g2.Size = new Size(450, 132);
             _cbWeekNum = new CheckBox();
             _cbWeekNum.Text = "显示周数列"; _cbWeekNum.Location = new Point(16, 26); _cbWeekNum.AutoSize = true; _cbWeekNum.Checked = Settings.ShowWeekNumbers;
@@ -2177,7 +2819,7 @@ namespace ChinaClock
             // ---- 假日与日程数据 ----
             GroupBox g3 = new GroupBox();
             g3.Text = "假日与日程数据";
-            g3.Location = new Point(12, 310);
+            g3.Location = new Point(12, 342);
             g3.Size = new Size(450, 132);
             _cbAutoFetch = new CheckBox();
             _cbAutoFetch.Text = "自动更新法定假日/调休数据（holiday-cn 数据源，每日一次）";
@@ -2229,7 +2871,7 @@ namespace ChinaClock
             // ---- 通用 ----
             GroupBox g4 = new GroupBox();
             g4.Text = "通用";
-            g4.Location = new Point(12, 450);
+            g4.Location = new Point(12, 482);
             g4.Size = new Size(450, 58);
             _cbAutoStart = new CheckBox();
             _cbAutoStart.Text = "开机自启（登录时启动）";
@@ -2241,12 +2883,12 @@ namespace ChinaClock
             Button ok = new Button();
             ok.Text = "保存";
             ok.Size = new Size(88, 30);
-            ok.Location = new Point(286, 520);
+            ok.Location = new Point(286, 552);
             ok.Click += delegate { SaveAndClose(); };
             Button cancel = new Button();
             cancel.Text = "取消";
             cancel.Size = new Size(88, 30);
-            cancel.Location = new Point(382, 520);
+            cancel.Location = new Point(382, 552);
             cancel.Click += delegate { Close(); };
             Controls.Add(ok);
             Controls.Add(cancel);
@@ -2271,6 +2913,7 @@ namespace ChinaClock
             Settings.ShowSeconds = _cbSeconds.Checked;
             Settings.ShowWeekday = _cbWeekday.Checked;
             Settings.ShowDateLine = _cbDateLine.Checked;
+            Settings.ShowLocalClock = _cbLocal.Checked;
             Settings.CustomTimeFormat = _tbFormat.Text.Trim();
             Settings.ShowSecondClock = _cbTz2.Checked;
             SettingsForm.TzItem tz = _cboTz.SelectedItem as SettingsForm.TzItem;
@@ -2330,9 +2973,12 @@ namespace ChinaClock
 
         private Rectangle _nativeRect;   // 系统时钟区域（物理像素）
         private Rectangle _trayRect;     // 任务栏区域
+        private DockEdge _dock = DockEdge.Bottom; // 任务栏停靠边（F1，随 EnsureTrayRect 刷新）
         private Color _bg = SystemColors.Control;
         private bool _lightTaskbar = true;
         private string _timeText = "", _dateText = "", _tzText = "", _lastStamp = "";
+        private bool _hideDate, _hideTz; // 侧边窄栏放不下的行（F1 宽度自适应；本机时间不上任务栏，见 F2）
+        private float _fontScale = 1f, _fontScaleCache = -1f;       // 窄栏时间行缩字号
         private Font _f1, _f2, _f3;
         private ToolTip _tip;            // A2：悬停显示 农历/节日/倒计时
         private string _lastTipText = "";
@@ -2355,14 +3001,16 @@ namespace ChinaClock
         private readonly bool _openAgendaDemo;
         private readonly bool _openListDemo;
         private readonly bool _openPickerDemo;
+        private readonly bool _openDayDetail;
 
-        public ClockForm(bool openPanel, bool openSettings, bool openAgendaDemo, bool openListDemo, bool openPickerDemo)
+        public ClockForm(bool openPanel, bool openSettings, bool openAgendaDemo, bool openListDemo, bool openPickerDemo, bool openDayDetail)
         {
             _openPanel = openPanel;
             _openSettings = openSettings;
             _openAgendaDemo = openAgendaDemo;
             _openListDemo = openListDemo;
             _openPickerDemo = openPickerDemo;
+            _openDayDetail = openDayDetail;
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.Manual;
@@ -2418,12 +3066,13 @@ namespace ChinaClock
             HolidayFeed.LoadCache(); // 离线先用缓存
             MaybeDailyFetch();
 
-            System.Threading.ThreadPool.QueueUserWorkItem(delegate
-            {
-                Rectangle r = TryUiaRect();
-                if (r.IsEmpty || !IsHandleCreated) return;
-                BeginInvoke((MethodInvoker)delegate { FitToNativeClock(r); });
-            });
+            if (!TaskbarLayout.PretendDock.HasValue) // 调试模式（--pretend-dock）跳过 UIA，纯几何验证
+                System.Threading.ThreadPool.QueueUserWorkItem(delegate
+                {
+                    Rectangle r = TryUiaRect();
+                    if (r.IsEmpty || !IsHandleCreated) return;
+                    BeginInvoke((MethodInvoker)delegate { FitToNativeClock(r); });
+                });
 
             // 点击任务栏时 Windows 会把任务栏窗口顶到置顶层最前，盖住本时钟（原生时钟
             // 露出，要等定位定时器 4 秒后才能顶回来）。挂系统事件钩子，前台切换或任务
@@ -2493,6 +3142,11 @@ namespace ChinaClock
             {
                 TogglePanel(); // 年月选择器视觉测试入口
                 if (_panel != null) _panel.OpenPickerDemo();
+            }
+            if (_openDayDetail)
+            {
+                TogglePanel(); // 日期详情卡片视觉测试入口（F1）
+                if (_panel != null) _panel.OpenCard(TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, ChinaTz).Date);
             }
             CheckReminders(); // 启动即检查一次当天日程（带时间的到点后由 15s 定时器补发）
             SampleBackgroundAsync(); // 首次显示后立刻按"可见状态"重新采底色（不等 15s 定时器）
@@ -2600,23 +3254,51 @@ namespace ChinaClock
         private void FitToNativeClock(Rectangle r)
         {
             EnsureTrayRect();
-            if (r.IsEmpty) r = _nativeRect.IsEmpty ? GeometricGuess() : _nativeRect;
+            if (TaskbarLayout.PretendDock.HasValue) r = GeometricGuess(); // 调试模式：纯几何定位，不用 UIA 实测
+            else if (r.IsEmpty) r = _nativeRect.IsEmpty ? GeometricGuess() : _nativeRect;
             else _nativeRect = r;
             if (r.IsEmpty || _trayRect.IsEmpty) return;
 
-            RecalcFonts(r.Height + 4);
-            Size s1 = TextRenderer.MeasureText(_timeText, _f1);
-            Size s2 = TextRenderer.MeasureText(_dateText, _f2);
-            int w = Math.Max(r.Width + 10, Math.Max(s1.Width, s2.Width) + 16);
-            int h = r.Height + 4;
-            int right = Math.Min(r.Right + 4, _trayRect.Right - 1);
-            var target = new Rectangle(right - w, r.Top + r.Height / 2 - h / 2, w, h);
+            bool vertical = _dock == DockEdge.Left || _dock == DockEdge.Right;
+            int maxW = vertical ? _trayRect.Width - 6 : int.MaxValue; // 侧边窄栏的可用宽度
 
+            // F1：窄栏宽度自适应——放不下的行隐藏（时间行必须保留），仍超宽则缩字号
+            _hideDate = _hideTz = false;
+            _fontScale = 1f;
+            RecalcFonts(r.Height + 4, 1f);
+            Size s1 = TextRenderer.MeasureText(_timeText, _f1);
+            while (s1.Width + 14 > maxW && _fontScale > 0.55f)
+            {
+                _fontScale = Math.Max(0.55f, _fontScale - 0.08f);
+                RecalcFonts(r.Height + 4, _fontScale);
+                s1 = TextRenderer.MeasureText(_timeText, _f1);
+            }
+            Size s2 = TextRenderer.MeasureText(_dateText, _f2);
+            Size s4 = TextRenderer.MeasureText(_tzText, _f3);
+            if (_dateText.Length > 0 && s2.Width + 14 > maxW) _hideDate = true;
+            if (_tzText.Length > 0 && s4.Width + 14 > maxW) _hideTz = true;
+
+            int w = Math.Max(r.Width + 10,
+                Math.Max(Math.Max(s1.Width, _hideDate ? 0 : s2.Width), _hideTz ? 0 : s4.Width) + 16);
+            int h = r.Height + 4;
+            if (vertical)
+            {
+                // 侧边栏有多行叠放时按需加高（钳在任务栏内）
+                int total = 0, lines = 0;
+                if (s1.Height > 0) { total += s1.Height + 1; lines++; }
+                if (_dateText.Length > 0 && !_hideDate) { total += s2.Height + 1; lines++; }
+                if (_tzText.Length > 0 && !_hideTz) { total += s4.Height + 1; lines++; }
+                if (lines > 0) total -= 1;
+                h = Math.Max(h, Math.Min(total + 4, _trayRect.Height - 8));
+            }
+
+            var target = TaskbarLayout.FitTarget(r, _trayRect, _dock, w, h);
             if (Bounds != target) { Bounds = target; Invalidate(); }
             if (IsHandleCreated) AssertTopmost();
         }
 
-        // 刷新任务栏矩形（FindWindow/GetWindowRect 很快，可在 UI 线程调用；explorer 重启后也能自恢复）
+        // 刷新任务栏矩形与停靠边（FindWindow/GetWindowRect 很快，可在 UI 线程调用；
+        // explorer 重启、用户挪任务栏后 fitTimer 4 秒内自动跟上）
         private void EnsureTrayRect()
         {
             IntPtr tray = FindWindow("Shell_TrayWnd", null);
@@ -2625,9 +3307,11 @@ namespace ChinaClock
             RECT tr;
             GetWindowRect(tray, out tr);
             _trayRect = Rectangle.FromLTRB(tr.Left, tr.Top, tr.Right, tr.Bottom);
+            _dock = TaskbarLayout.PretendDock ?? TaskbarLayout.Detect(_trayRect, Screen.PrimaryScreen.Bounds);
         }
 
         // 仅在后台线程调用：用 UI Automation 在任务栏里找时钟元素（名字以 HH:mm 开头、位于托盘区）。
+        // F1：过滤条件按停靠轴向泛化——水平停靠时钟贴任务栏右端，垂直停靠时钟贴底端。
         // 注意：explorer 偶尔会让 UIA 调用长时间阻塞，绝不能在 UI 线程上执行；
         // 阻塞只会卡住这个后台线程，不影响小程序正常显示。
         private Rectangle TryUiaRect()
@@ -2641,12 +3325,15 @@ namespace ChinaClock
                 GetWindowRect(tray, out tr);
                 Rectangle trayRect = Rectangle.FromLTRB(tr.Left, tr.Top, tr.Right, tr.Bottom);
                 if (trayRect.IsEmpty) return Rectangle.Empty;
+                DockEdge dock = TaskbarLayout.PretendDock ??
+                    TaskbarLayout.Detect(trayRect, Screen.PrimaryScreen.Bounds);
+                bool vertical = dock == DockEdge.Left || dock == DockEdge.Right;
 
                 AutomationElement root = AutomationElement.FromHandle(tray);
                 if (root == null) return Rectangle.Empty;
                 AutomationElementCollection els = root.FindAll(TreeScope.Descendants, Condition.TrueCondition);
                 Rectangle best = Rectangle.Empty;
-                int bestRight = int.MinValue;
+                int bestEnd = int.MinValue; // 水平停靠比右缘，垂直停靠比下缘
                 foreach (AutomationElement el in els)
                 {
                     try
@@ -2655,12 +3342,25 @@ namespace ChinaClock
                         if (string.IsNullOrEmpty(n) || !TimeNameRx.IsMatch(n)) continue;
                         System.Windows.Rect br = el.Current.BoundingRectangle;
                         if (br.IsEmpty) continue;
-                        if (br.Right < trayRect.Right - 320) continue;
-                        if (br.Top < trayRect.Top - 4 || br.Bottom > trayRect.Bottom + 4) continue;
-                        if (br.Right > bestRight)
+                        if (vertical)
                         {
-                            bestRight = (int)br.Right;
-                            best = Rectangle.Truncate(new RectangleF((float)br.X, (float)br.Y, (float)br.Width, (float)br.Height));
+                            if (br.Bottom < trayRect.Bottom - 320) continue;
+                            if (br.Left < trayRect.Left - 4 || br.Right > trayRect.Right + 4) continue;
+                            if (br.Bottom > bestEnd)
+                            {
+                                bestEnd = (int)br.Bottom;
+                                best = Rectangle.Truncate(new RectangleF((float)br.X, (float)br.Y, (float)br.Width, (float)br.Height));
+                            }
+                        }
+                        else
+                        {
+                            if (br.Right < trayRect.Right - 320) continue;
+                            if (br.Top < trayRect.Top - 4 || br.Bottom > trayRect.Bottom + 4) continue;
+                            if (br.Right > bestEnd)
+                            {
+                                bestEnd = (int)br.Right;
+                                best = Rectangle.Truncate(new RectangleF((float)br.X, (float)br.Y, (float)br.Width, (float)br.Height));
+                            }
                         }
                     }
                     catch { }
@@ -2670,28 +3370,28 @@ namespace ChinaClock
             catch { return Rectangle.Empty; }
         }
 
-        // UIA 不可用时的兜底：按任务栏几何位置估算时钟区域
+        // UIA 不可用时的兜底：按任务栏几何位置估算时钟区域（F1：按停靠边分派）
         private Rectangle GeometricGuess()
         {
             if (_trayRect.IsEmpty) return Rectangle.Empty;
-            float k = _trayRect.Height / 48f;
-            int w = (int)(92 * k), h = (int)(42 * k);
-            return new Rectangle(_trayRect.Right - (int)(10 * k) - w,
-                                 _trayRect.Top + (_trayRect.Height - h) / 2, w, h);
+            return TaskbarLayout.GuessClockRect(_trayRect, _dock);
         }
 
         // ---- 外观 ----
 
-        private void RecalcFonts(int h)
+        private void RecalcFonts(int h, float scale)
         {
-            if (h == _fontH && _f1 != null) return;
+            if (h == _fontH && scale == _fontScaleCache && _f1 != null) return;
             _fontH = h;
+            _fontScaleCache = scale;
             if (_f1 != null) _f1.Dispose();
             if (_f2 != null) _f2.Dispose();
             if (_f3 != null) _f3.Dispose();
-            _f1 = new Font("Segoe UI", Math.Max(10, (int)Math.Round(h * 0.30f)), FontStyle.Regular, GraphicsUnit.Pixel);
-            _f2 = new Font("Segoe UI", Math.Max(8, (int)Math.Round(h * 0.22f)), FontStyle.Regular, GraphicsUnit.Pixel);
-            _f3 = new Font("Segoe UI", Math.Max(7, (int)Math.Round(h * 0.17f)), FontStyle.Regular, GraphicsUnit.Pixel);
+            // 窄栏缩字号（F1）：scale<1 时下限放宽到 7px，否则维持原下限
+            int min1 = scale < 1f ? 7 : 10, min2 = scale < 1f ? 6 : 8, min3 = scale < 1f ? 5 : 7;
+            _f1 = new Font("Segoe UI", Math.Max(min1, (int)Math.Round(h * 0.30f * scale)), FontStyle.Regular, GraphicsUnit.Pixel);
+            _f2 = new Font("Segoe UI", Math.Max(min2, (int)Math.Round(h * 0.22f * scale)), FontStyle.Regular, GraphicsUnit.Pixel);
+            _f3 = new Font("Segoe UI", Math.Max(min3, (int)Math.Round(h * 0.17f * scale)), FontStyle.Regular, GraphicsUnit.Pixel);
         }
 
         // 任务栏底色采样：在后台线程用 CopyFromScreen 抓取任务栏像素条，取"均匀条"
@@ -2712,22 +3412,17 @@ namespace ChinaClock
             if (tray == IntPtr.Zero) return;
             RECT tr;
             GetWindowRect(tray, out tr);
-            int trH = tr.Bottom - tr.Top;
-            if (trH < 20) return;
+            bool vertical = TaskbarLayout.PretendDock.HasValue
+                ? TaskbarLayout.PretendDock.Value == DockEdge.Left || TaskbarLayout.PretendDock.Value == DockEdge.Right
+                : tr.Right - tr.Left < tr.Bottom - tr.Top;
+            int trShort = vertical ? tr.Right - tr.Left : tr.Bottom - tr.Top;
+            if (trShort < 20) return;
             // 任务栏自动隐藏收起后坐标已移出屏幕，采样会抓到无关窗口（如深色终端），直接跳过
             Rectangle screen = Screen.PrimaryScreen.Bounds;
-            if (tr.Top >= screen.Bottom || tr.Bottom <= screen.Top || tr.Left >= screen.Right) return;
+            if (tr.Top >= screen.Bottom || tr.Bottom <= screen.Top || tr.Left >= screen.Right || tr.Right <= screen.Left) return;
             bool vis = IsHandleCreated && Visible;
             int wl = vis ? Bounds.Left : 0, wrt = vis ? Bounds.Right : 0;
-
-            int off = Math.Max(5, Math.Min(10, trH / 8)); // 贴边 5~10px：避开顶/底边框线与图标带
-            int yb = tr.Bottom - off, yt = tr.Top + off, ym = tr.Top + trH / 2;
-            int[][] xsNear =
-            {
-                new[] { wl - 90, wl - 6 },       // 本窗口左侧附近（Mica 横向渐变时这里最接近）
-                new[] { wl - 180, wl - 90 },     // 稍远一点的左侧
-                new[] { wrt + 4, tr.Right - 8 }, // 右侧缝隙（避开最右"显示桌面"细条）
-            };
+            int wt = vis ? Bounds.Top : 0, wb = vis ? Bounds.Bottom : 0;
 
             System.Threading.ThreadPool.QueueUserWorkItem(delegate
             {
@@ -2738,26 +3433,70 @@ namespace ChinaClock
                 };
 
                 Color col;
-                // 1) 上/下贴边细条（永远没有图标，最可靠）
-                foreach (int y in new[] { yb, yt })
+                if (!vertical)
                 {
-                    if (y <= screen.Top || y >= screen.Bottom) continue;
-                    foreach (int[] s in xsNear)
+                    // 水平停靠（顶/底）：贴上/下边缘横条 + 沿中线从时钟往左横扫（原逻辑）
+                    int off = Math.Max(5, Math.Min(10, trShort / 8)); // 贴边 5~10px：避开顶/底边框线与图标带
+                    int yb = tr.Bottom - off, yt = tr.Top + off, ym = tr.Top + (tr.Bottom - tr.Top) / 2;
+                    int[][] xsNear =
                     {
-                        int x0 = Math.Max(tr.Left + 2, s[0]);
-                        int x1 = Math.Min(tr.Right - 8, s[1]);
-                        if (x1 - x0 + 1 < 30) continue;
-                        if (TrySampleStrip(x0, y, x1 - x0 + 1, out col)) { apply(col); return; }
+                        new[] { wl - 90, wl - 6 },       // 本窗口左侧附近（Mica 横向渐变时这里最接近）
+                        new[] { wl - 180, wl - 90 },     // 稍远一点的左侧
+                        new[] { wrt + 4, tr.Right - 8 }, // 右侧缝隙（避开最右"显示桌面"细条）
+                    };
+                    // 1) 上/下贴边细条（永远没有图标，最可靠）
+                    foreach (int y in new[] { yb, yt })
+                    {
+                        if (y <= screen.Top || y >= screen.Bottom) continue;
+                        foreach (int[] s in xsNear)
+                        {
+                            int x0 = Math.Max(tr.Left + 2, s[0]);
+                            int x1 = Math.Min(tr.Right - 8, s[1]);
+                            if (x1 - x0 + 1 < 30) continue;
+                            if (TrySampleStrip(x0, y, x1 - x0 + 1, 1, out col)) { apply(col); return; }
+                        }
+                    }
+                    // 2) 垂直中线从时钟往左按 48px 步进扫描（同一水平线的 Mica 色最一致；
+                    //    有图标/按钮的条极差巨大自动跳过，扫到第一个均匀条为止）
+                    if (ym > screen.Top && ym < screen.Bottom)
+                    {
+                        for (int x1 = Math.Min(wl - 6, tr.Right - 8); x1 > tr.Left + 60; x1 -= 48)
+                        {
+                            int x0 = Math.Max(tr.Left + 2, x1 - 48);
+                            if (TrySampleStrip(x0, ym, x1 - x0 + 1, 1, out col)) { apply(col); return; }
+                        }
                     }
                 }
-                // 2) 垂直中线从时钟往左按 48px 步进扫描（同一水平线的 Mica 色最一致；
-                //    有图标/按钮的条极差巨大自动跳过，扫到第一个均匀条为止）
-                if (ym > screen.Top && ym < screen.Bottom)
+                else
                 {
-                    for (int x1 = Math.Min(wl - 6, tr.Right - 8); x1 > tr.Left + 60; x1 -= 48)
+                    // 垂直停靠（左/右，F1）：贴左/右边缘竖条 + 沿水平中线从时钟往上竖扫，
+                    // 与水平逻辑轴对称——图标带都在截面的中部，贴边条永远没有图标
+                    int off = Math.Max(5, Math.Min(10, trShort / 8));
+                    int xr = tr.Right - off, xl = tr.Left + off, xm = tr.Left + (tr.Right - tr.Left) / 2;
+                    int[][] ysNear =
                     {
-                        int x0 = Math.Max(tr.Left + 2, x1 - 48);
-                        if (TrySampleStrip(x0, ym, x1 - x0 + 1, out col)) { apply(col); return; }
+                        new[] { wt - 90, wt - 6 },       // 本窗口上方附近（Mica 纵向渐变时这里最接近）
+                        new[] { wt - 180, wt - 90 },     // 稍远一点的上方
+                        new[] { wb + 4, tr.Bottom - 8 }, // 下方缝隙
+                    };
+                    foreach (int x in new[] { xl, xr })
+                    {
+                        if (x <= screen.Left || x >= screen.Right) continue;
+                        foreach (int[] s in ysNear)
+                        {
+                            int y0 = Math.Max(tr.Top + 2, s[0]);
+                            int y1 = Math.Min(tr.Bottom - 8, s[1]);
+                            if (y1 - y0 + 1 < 30) continue;
+                            if (TrySampleStrip(x, y0, 1, y1 - y0 + 1, out col)) { apply(col); return; }
+                        }
+                    }
+                    if (xm > screen.Left && xm < screen.Right)
+                    {
+                        for (int y1 = Math.Min(wt - 6, tr.Bottom - 8); y1 > tr.Top + 60; y1 -= 48)
+                        {
+                            int y0 = Math.Max(tr.Top + 2, y1 - 48);
+                            if (TrySampleStrip(xm, y0, 1, y1 - y0 + 1, out col)) { apply(col); return; }
+                        }
                     }
                 }
                 // 3) 采样全部失败（如截屏被策略阻挡）时按系统主题取标准任务栏色
@@ -2782,25 +3521,27 @@ namespace ChinaClock
             return light ? Color.FromArgb(243, 243, 243) : Color.FromArgb(32, 32, 32);
         }
 
-        // 采样一条 w×1 像素：条内颜色极差 ≤20 视为"均匀"（没有图标/边框线/窗口
-        // 边缘等干扰），输出条内平均色。Mica 横向渐变在几十 px 内变化只有几个色阶，
-        // 极差判定完全免疫；而穿过图标的条极差动辄 200+，必然被拒。
-        private static bool TrySampleStrip(int x0, int y, int w, out Color col)
+        // 采样一条 w×h 像素细条（水平停靠 w>1,h=1；垂直停靠 w=1,h>1）：条内颜色
+        // 极差 ≤20 视为"均匀"（没有图标/边框线/窗口边缘等干扰），输出条内平均色。
+        // Mica 渐变在几十 px 内变化只有几个色阶，极差判定完全免疫；
+        // 而穿过图标的条极差动辄 200+，必然被拒。
+        private static bool TrySampleStrip(int x0, int y0, int w, int h, out Color col)
         {
             col = Color.Empty;
             try
             {
                 int minR = 255, maxR = 0, minG = 255, maxG = 0, minB = 255, maxB = 0;
                 long sumR = 0, sumG = 0, sumB = 0;
-                using (var bmp = new Bitmap(w, 1, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                int n = w * h;
+                using (var bmp = new Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
                 {
                     using (var g = Graphics.FromImage(bmp))
-                        g.CopyFromScreen(x0, y, 0, 0, new Size(w, 1));
-                    var bd = bmp.LockBits(new Rectangle(0, 0, w, 1),
+                        g.CopyFromScreen(x0, y0, 0, 0, new Size(w, h));
+                    var bd = bmp.LockBits(new Rectangle(0, 0, w, h),
                         System.Drawing.Imaging.ImageLockMode.ReadOnly,
                         System.Drawing.Imaging.PixelFormat.Format32bppArgb);
-                    var buf = new int[w];
-                    Marshal.Copy(bd.Scan0, buf, 0, w);
+                    var buf = new int[n];
+                    Marshal.Copy(bd.Scan0, buf, 0, n);
                     bmp.UnlockBits(bd);
                     foreach (int px in buf)
                     {
@@ -2816,7 +3557,7 @@ namespace ChinaClock
                 }
                 int range = Math.Max(maxR - minR, Math.Max(maxG - minG, maxB - minB));
                 if (range > 20) return false; // 条内有干扰，不可信
-                col = Color.FromArgb((int)(sumR / w), (int)(sumG / w), (int)(sumB / w));
+                col = Color.FromArgb((int)(sumR / n), (int)(sumG / n), (int)(sumB / n));
                 return true;
             }
             catch { return false; }
@@ -2850,6 +3591,7 @@ namespace ChinaClock
             if (Settings.ShowWeekday) t += "  " + Weekdays[(int)now.DayOfWeek];
             _timeText = t;
             _dateText = Settings.ShowDateLine ? now.ToString(_datePattern) : "";
+            // F2：本机时间不上任务栏（字号太小看不清）——悬停提示与日历面板展示
             _tzText = Settings.ShowSecondClock ? SecondClockText() : "";
             UpdateTip(now);
             Invalidate();
@@ -2893,36 +3635,13 @@ namespace ChinaClock
             if (di.Festival != null) lines.Add("今天 " + di.Festival);
             else if (di.TermName != null) lines.Add("今天 " + di.TermName);
             DateTime hd; string hn;
-            if (NextHoliday(now.Date, out hd, out hn))
+            if (CalendarData.NextFestival(now.Date, out hd, out hn))
             {
                 int cd = (int)(hd - now.Date).TotalDays;
                 lines.Add(cd == 0 ? "今天 " + hn : "距 " + hn + " 还有 " + cd + " 天");
             }
+            if (LocalClock.Enabled) lines.Add(LocalClock.PanelText); // F2：本机时间
             return string.Join("\n", lines.ToArray());
-        }
-
-        // 最近一个法定/传统节日（含今天）
-        private static bool NextHoliday(DateTime today, out DateTime date, out string name)
-        {
-            DateTime best = DateTime.MaxValue; string bestName = null;
-            for (int y = today.Year; y <= today.Year + 1; y++)
-            {
-                AddCand(ref best, ref bestName, new DateTime(y, 1, 1), "元旦", today);
-                AddCand(ref best, ref bestName, CalendarData.TermDate(y, "清明"), "清明", today);
-                AddCand(ref best, ref bestName, new DateTime(y, 5, 1), "劳动节", today);
-                AddCand(ref best, ref bestName, new DateTime(y, 10, 1), "国庆节", today);
-                try { AddCand(ref best, ref bestName, CalendarData.LunarDate(y, 1, 1), "春节", today); } catch { }
-                try { AddCand(ref best, ref bestName, CalendarData.LunarDate(y, 5, 5), "端午", today); } catch { }
-                try { AddCand(ref best, ref bestName, CalendarData.LunarDate(y, 8, 15), "中秋", today); } catch { }
-            }
-            if (best == DateTime.MaxValue) { date = today; name = null; return false; }
-            date = best; name = bestName; return true;
-        }
-
-        private static void AddCand(ref DateTime best, ref string bestName, DateTime d, string n, DateTime today)
-        {
-            if (d.Date < today || d >= best) return;
-            best = d; bestName = n;
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -2931,11 +3650,13 @@ namespace ChinaClock
             Color c1 = _lightTaskbar ? Color.FromArgb(26, 26, 26) : Color.FromArgb(242, 242, 242);
             Color c2 = _lightTaskbar ? Color.FromArgb(96, 96, 96) : Color.FromArgb(197, 197, 197);
 
-            // 行集合按设置动态组装（A1/A3）：时间行 + 日期行 + 第二时区行，整体垂直居中
+            // 行集合按设置动态组装（A1/A3）：时间行 + 日期行 + 第二时区行，
+            // 整体垂直居中；侧边窄栏放不下的行已由 FitToNativeClock 置隐藏标记（F1）。
+            // 本机时间不上任务栏（F2）——字号太小看不清，悬停提示/日历面板展示。
             List<Line> ls = new List<Line>();
             if (_timeText.Length > 0) ls.Add(new Line(_timeText, _f1, c1));
-            if (_dateText.Length > 0) ls.Add(new Line(_dateText, _f2, c2));
-            if (_tzText.Length > 0) ls.Add(new Line(_tzText, _f3, c2));
+            if (_dateText.Length > 0 && !_hideDate) ls.Add(new Line(_dateText, _f2, c2));
+            if (_tzText.Length > 0 && !_hideTz) ls.Add(new Line(_tzText, _f3, c2));
 
             int total = 0;
             foreach (Line ln in ls) total += TextRenderer.MeasureText(ln.Text, ln.Font).Height + 1;
