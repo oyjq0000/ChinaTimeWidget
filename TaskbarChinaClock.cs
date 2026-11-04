@@ -13,6 +13,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Globalization;
 using System.IO;
+using System.Net;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Windows.Automation;
@@ -29,12 +30,32 @@ namespace ChinaClock
         [STAThread]
         private static void Main(string[] args)
         {
-            if (args != null && args.Length > 0 && args[0] == "--selftest")
+            string[] a = args ?? new string[0];
+            if (Array.IndexOf(a, "--selftest") >= 0)
             {
                 SelfTest.Run();
                 return;
             }
-            bool openPanel = args != null && args.Length > 0 && args[0] == "--show-panel";
+            if (Array.IndexOf(a, "--fetch-holidays") >= 0)
+            {
+                // 测试入口：同步拉取 holiday-cn 并把结果写入 fetch-result.txt（winexe 无控制台）
+                Settings.Load();
+                bool ok = HolidayFeed.FetchOnce();
+                string report = "ok=" + ok + " count=" + (HolidayFeed.Data != null ? HolidayFeed.Data.Count : 0);
+                if (HolidayFeed.Data != null)
+                {
+                    List<DateTime> ks = new List<DateTime>(HolidayFeed.Data.Keys);
+                    ks.Sort();
+                    foreach (DateTime k in ks)
+                        report += "\r\n" + k.ToString("yyyy-MM-dd") + " " + HolidayFeed.Data[k];
+                }
+                File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "fetch-result.txt"), report);
+                return;
+            }
+            bool openPanel = Array.IndexOf(a, "--show-panel") >= 0;
+            bool openSettings = Array.IndexOf(a, "--settings") >= 0;
+            bool agendaDemo = Array.IndexOf(a, "--agenda-demo") >= 0;
+            bool listDemo = Array.IndexOf(a, "--list-demo") >= 0;
 
             bool createdNew;
             using (new System.Threading.Mutex(true, "ChinaClock_SingleInstance", out createdNew))
@@ -43,7 +64,7 @@ namespace ChinaClock
                 try { SetProcessDPIAware(); } catch { }
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                Application.Run(new ClockForm(openPanel));
+                Application.Run(new ClockForm(openPanel, openSettings, agendaDemo, listDemo));
             }
         }
     }
@@ -124,6 +145,33 @@ namespace ChinaClock
             Check(lines, ref fails, "未公布年份周末仍休 2027-02-06(春节,周六)", CalendarData.Get(new DateTime(2027, 2, 6)).Badge == "休",
                 CalendarData.Get(new DateTime(2027, 2, 6)).Badge ?? "(null)");
 
+            // holiday-cn 解析（含节日名）+ ISO 周数 + 日程行解析
+            string sampleJson = "{\"year\":2027,\"days\":[{\"name\":\"元旦\",\"date\":\"2027-01-01\",\"isOffDay\":true},"
+                + "{\"name\":\"春节\",\"date\":\"2027-02-08\",\"isOffDay\":true},{\"name\":\"调休上班\",\"date\":\"2027-02-06\",\"isOffDay\":false}]}";
+            Dictionary<DateTime, string> names = new Dictionary<DateTime, string>();
+            Dictionary<DateTime, string> parsed = CalendarData.ParseHolidayCn(sampleJson, names);
+            Check(lines, ref fails, "holiday-cn 解析条数 = 3", parsed.Count == 3, parsed.Count.ToString());
+            Check(lines, ref fails, "holiday-cn 2027-01-01 = 休", parsed.ContainsKey(new DateTime(2027, 1, 1)) && parsed[new DateTime(2027, 1, 1)] == "休", "");
+            Check(lines, ref fails, "holiday-cn 2027-02-06 = 班", parsed.ContainsKey(new DateTime(2027, 2, 6)) && parsed[new DateTime(2027, 2, 6)] == "班", "");
+            Check(lines, ref fails, "holiday-cn 名称解析 春节", names.ContainsKey(new DateTime(2027, 2, 8)) && names[new DateTime(2027, 2, 8)] == "春节", "");
+            Check(lines, ref fails, "ISO 周数 2026-01-01 = 1", CalendarData.IsoWeek(new DateTime(2026, 1, 1)) == 1,
+                CalendarData.IsoWeek(new DateTime(2026, 1, 1)).ToString());
+            Check(lines, ref fails, "ISO 周数 2027-01-01 = 53", CalendarData.IsoWeek(new DateTime(2027, 1, 1)) == 53,
+                CalendarData.IsoWeek(new DateTime(2027, 1, 1)).ToString());
+
+            AgendaItem it1 = AgendaStore.ParseLine("农历 08-15|妈妈生日");
+            Check(lines, ref fails, "日程解析 农历每年", it1 != null && it1.LunarMonth == 8 && it1.LunarDay == 15 && it1.Yearly,
+                it1 == null ? "(null)" : it1.LunarMonth + "/" + it1.LunarDay);
+            AgendaItem it2 = AgendaStore.ParseLine("每年 05-20|15:00 结婚纪念日");
+            Check(lines, ref fails, "日程解析 公历每年+时间", it2 != null && it2.SolarMonth == 5 && it2.SolarDay == 20 && it2.Time == "15:00",
+                it2 == null ? "(null)" : it2.SolarMonth + "/" + it2.SolarDay + " " + (it2.Time ?? ""));
+            AgendaItem it3 = AgendaStore.ParseLine("2026-11-04|提交周报");
+            Check(lines, ref fails, "日程解析 一次性", it3 != null && it3.Date == new DateTime(2026, 11, 4) && !it3.Yearly && it3.Time == null,
+                it3 == null ? "(null)" : it3.Date.ToString("yyyy-MM-dd"));
+            Check(lines, ref fails, "日程解析 非法行返回 null", AgendaStore.ParseLine("随便一行") == null, "");
+            Check(lines, ref fails, "角标原因 国庆节(在线名)", CalendarData.BadgeReason(new DateTime(2026, 10, 1), "休", null) != null,
+                CalendarData.BadgeReason(new DateTime(2026, 10, 1), "休", null) ?? "(null)");
+
             lines.Add("");
             lines.Add(fails == 0 ? "RESULT: ALL PASS (" + lines.Count + " checks)" : "RESULT: " + fails + " FAILURES");
             string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "selftest-result.txt");
@@ -135,6 +183,504 @@ namespace ChinaClock
         {
             if (!ok) fails++;
             lines.Add((ok ? "[PASS] " : "[FAIL] ") + name + (ok || detail.Length == 0 ? "" : "  -> 实际: " + detail));
+        }
+    }
+
+    // ============================ 设置 ============================
+
+    // settings.ini（%APPDATA%\ChinaClock\settings.ini），零依赖 key=value；
+    // 各窗体直接读静态字段，设置窗保存后立即生效
+    internal static class Settings
+    {
+        public static bool ShowSeconds = true;
+        public static bool ShowWeekday = true;
+        public static bool ShowDateLine = true;
+        public static string CustomTimeFormat = "";  // 非空时优先生效（DateTime 格式串）
+        public static bool ShowSecondClock = false;  // 第二时区双时钟（A3）
+        public static string SecondTzId = "UTC";     // Windows 时区 Id
+        public static string SecondTzLabel = "UTC";
+        public static bool ShowWeekNumbers = false;  // 日历左侧周数列（B2）
+        public static int ThemeMode = 0;             // 0=跟随系统 1=浅色 2=深色（C1）
+        public static string Accent = "#4472C4";     // 强调色（C3）
+        public static bool AutoFetchHolidays = true; // B1：每日自动更新假日数据
+        public static string HolidaysFetchedAt = "";
+
+        public static readonly string FilePath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "ChinaClock", "settings.ini");
+
+        public static void Load()
+        {
+            try
+            {
+                if (!File.Exists(FilePath)) return;
+                foreach (string raw in File.ReadAllLines(FilePath))
+                {
+                    int i = raw.IndexOf('=');
+                    if (i <= 0) continue;
+                    string k = raw.Substring(0, i).Trim();
+                    string v = raw.Substring(i + 1).Trim();
+                    switch (k)
+                    {
+                        case "ShowSeconds": ShowSeconds = GetBool(v, ShowSeconds); break;
+                        case "ShowWeekday": ShowWeekday = GetBool(v, ShowWeekday); break;
+                        case "ShowDateLine": ShowDateLine = GetBool(v, ShowDateLine); break;
+                        case "CustomTimeFormat": CustomTimeFormat = v; break;
+                        case "ShowSecondClock": ShowSecondClock = GetBool(v, ShowSecondClock); break;
+                        case "SecondTzId": if (v.Length > 0) SecondTzId = v; break;
+                        case "SecondTzLabel": SecondTzLabel = v; break;
+                        case "ShowWeekNumbers": ShowWeekNumbers = GetBool(v, ShowWeekNumbers); break;
+                        case "ThemeMode": ThemeMode = GetInt(v, ThemeMode); break;
+                        case "Accent": if (v.Length > 0) Accent = v; break;
+                        case "AutoFetchHolidays": AutoFetchHolidays = GetBool(v, AutoFetchHolidays); break;
+                        case "HolidaysFetchedAt": HolidaysFetchedAt = v; break;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public static void Save()
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(FilePath));
+                List<string> lines = new List<string>();
+                lines.Add("ShowSeconds=" + ShowSeconds);
+                lines.Add("ShowWeekday=" + ShowWeekday);
+                lines.Add("ShowDateLine=" + ShowDateLine);
+                lines.Add("CustomTimeFormat=" + CustomTimeFormat);
+                lines.Add("ShowSecondClock=" + ShowSecondClock);
+                lines.Add("SecondTzId=" + SecondTzId);
+                lines.Add("SecondTzLabel=" + SecondTzLabel);
+                lines.Add("ShowWeekNumbers=" + ShowWeekNumbers);
+                lines.Add("ThemeMode=" + ThemeMode);
+                lines.Add("Accent=" + Accent);
+                lines.Add("AutoFetchHolidays=" + AutoFetchHolidays);
+                lines.Add("HolidaysFetchedAt=" + HolidaysFetchedAt);
+                File.WriteAllLines(FilePath, lines.ToArray());
+            }
+            catch { }
+        }
+
+        private static bool GetBool(string v, bool fallback) { bool b; return bool.TryParse(v, out b) ? b : fallback; }
+        private static int GetInt(string v, int fallback) { int i; return int.TryParse(v, out i) ? i : fallback; }
+    }
+
+    // ============================ 面板配色 ============================
+
+    // C1 深色模式 / C3 强调色：浅色、深色两套基础色；选中/高亮底色由
+    // 强调色与背景混合而来，换强调色自动跟随
+    internal sealed class PanelPalette
+    {
+        public bool Dark;
+        public Color Back, Border, Text, Sub, Red, Blue, Accent, Dim, DimSub, SubLunar,
+            SelBg, Hover, BtnBg, BtnHot, RestBg, RestFg, WorkBg, WorkFg, Dot;
+
+        public static PanelPalette Load()
+        {
+            bool dark;
+            if (Settings.ThemeMode == 1) dark = false;
+            else if (Settings.ThemeMode == 2) dark = true;
+            else dark = !SystemThemeLight();
+
+            PanelPalette p = new PanelPalette();
+            p.Dark = dark;
+            p.Accent = ParseAccent();
+            if (!dark)
+            {
+                p.Back = Color.White;
+                p.Border = Color.FromArgb(226, 226, 226);
+                p.Text = Color.FromArgb(51, 51, 51);
+                p.Sub = Color.FromArgb(107, 107, 107);
+                p.Red = Color.FromArgb(224, 72, 62);
+                p.Blue = Color.FromArgb(58, 123, 213);
+                p.Dim = Color.FromArgb(205, 205, 205);
+                p.DimSub = Color.FromArgb(222, 222, 222);
+                p.SubLunar = Color.FromArgb(166, 166, 166);
+                p.Hover = Color.FromArgb(228, 231, 236);
+                p.BtnBg = Color.FromArgb(243, 244, 246);
+                p.BtnHot = Color.FromArgb(228, 231, 236);
+                p.RestBg = Color.FromArgb(253, 236, 234);
+                p.RestFg = Color.FromArgb(224, 72, 62);
+                p.WorkBg = Color.FromArgb(255, 243, 224);
+                p.WorkFg = Color.FromArgb(230, 126, 34);
+                p.Dot = Color.FromArgb(230, 126, 34);
+            }
+            else
+            {
+                p.Back = Color.FromArgb(32, 32, 32);
+                p.Border = Color.FromArgb(64, 64, 64);
+                p.Text = Color.FromArgb(235, 235, 235);
+                p.Sub = Color.FromArgb(156, 156, 156);
+                p.Red = Color.FromArgb(240, 98, 88);
+                p.Blue = Color.FromArgb(110, 160, 225);
+                p.Dim = Color.FromArgb(84, 84, 84);
+                p.DimSub = Color.FromArgb(74, 74, 74);
+                p.SubLunar = Color.FromArgb(150, 150, 150);
+                p.Hover = Color.FromArgb(54, 56, 60);
+                p.BtnBg = Color.FromArgb(48, 49, 52);
+                p.BtnHot = Color.FromArgb(62, 64, 68);
+                p.RestBg = Color.FromArgb(84, 46, 44);
+                p.RestFg = Color.FromArgb(242, 122, 112);
+                p.WorkBg = Color.FromArgb(92, 66, 34);
+                p.WorkFg = Color.FromArgb(238, 168, 84);
+                p.Dot = Color.FromArgb(238, 168, 84);
+            }
+            p.SelBg = Blend(p.Back, p.Accent, dark ? 0.32f : 0.14f);
+            return p;
+        }
+
+        public static bool SystemThemeLight()
+        {
+            bool light = true;
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(
+                    @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"))
+                {
+                    object v = k != null ? k.GetValue("SystemUsesLightTheme") : null;
+                    if (v is int) light = (int)v == 1;
+                }
+            }
+            catch { }
+            return light;
+        }
+
+        private static Color ParseAccent()
+        {
+            try { return ColorTranslator.FromHtml(Settings.Accent); }
+            catch { return Color.FromArgb(68, 114, 196); }
+        }
+
+        public static Color Blend(Color a, Color b, float t)
+        {
+            return Color.FromArgb(
+                (int)Math.Round(a.R + (b.R - a.R) * t),
+                (int)Math.Round(a.G + (b.G - a.G) * t),
+                (int)Math.Round(a.B + (b.B - a.B) * t));
+        }
+    }
+
+    // ============================ 假日数据源 ============================
+
+    // B1：从 NateScarlet/holiday-cn（依据国务院公告整理的调休数据）拉取当年+次年
+    // 休/班数据。jsDelivr/raw 多镜像逐个尝试，成功后写本地缓存；离线时用缓存，
+    // 连缓存都没有时退回内置规则。角标优先级：holidays.txt 手动 > 在线 > 内置。
+    internal static class HolidayFeed
+    {
+        public static Dictionary<DateTime, string> Data;  // null=尚未加载
+        public static DateTime? LastFetch;
+        private static bool _fetching;
+
+        public static readonly string CachePath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ChinaClock", "holidays-cache.txt");
+
+        private static readonly string[] Mirrors =
+        {
+            "https://cdn.jsdelivr.net/gh/NateScarlet/holiday-cn@master/{0}.json",
+            "https://fastly.jsdelivr.net/gh/NateScarlet/holiday-cn@master/{0}.json",
+            "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{0}.json",
+        };
+
+        // 启动时用缓存先行（离线也有角标）；缓存 v2 格式 "yyyy-MM-dd|休|节日名"
+        public static void LoadCache()
+        {
+            try
+            {
+                if (!File.Exists(CachePath)) return;
+                var dict = new Dictionary<DateTime, string>();
+                var names = new Dictionary<DateTime, string>();
+                foreach (string raw in File.ReadAllLines(CachePath))
+                {
+                    string line = raw.Trim();
+                    string[] parts = line.Split('|');
+                    if (parts.Length < 2) continue;
+                    DateTime d;
+                    if (!DateTime.TryParseExact(parts[0], "yyyy-MM-dd",
+                            CultureInfo.InvariantCulture, DateTimeStyles.None, out d)) continue;
+                    dict[d.Date] = parts[1] == "班" ? "班" : "休";
+                    if (parts.Length >= 3 && parts[2].Length > 0 && !names.ContainsKey(d.Date)) names[d.Date] = parts[2];
+                }
+                if (dict.Count > 0) { Data = dict; CalendarData.SetOnlineData(dict, names); }
+            }
+            catch { }
+        }
+
+        public static void FetchAsync(Action<bool> done)
+        {
+            if (_fetching) return;
+            _fetching = true;
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
+            {
+                bool ok = false;
+                try { ok = FetchOnce(); } catch { }
+                _fetching = false;
+                if (done != null) done(ok);
+            });
+        }
+
+        public static bool FetchOnce()
+        {
+            try { ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072 | ServicePointManager.SecurityProtocol; }
+            catch { }
+            int y = DateTime.Now.Year;
+            var merged = new Dictionary<DateTime, string>();
+            var mergedNames = new Dictionary<DateTime, string>();
+            foreach (int yy in new[] { y, y + 1 })
+                foreach (string tpl in Mirrors)
+                {
+                    string json = HttpGet(string.Format(tpl, yy), 8000);
+                    if (json == null) continue;
+                    var part = CalendarData.ParseHolidayCn(json, mergedNames);
+                    if (part.Count == 0) continue;
+                    foreach (KeyValuePair<DateTime, string> kv in part) merged[kv.Key] = kv.Value;
+                    break; // 该年成功即尝试下一年
+                }
+            if (merged.Count == 0) return false;
+
+            Data = merged;
+            CalendarData.SetOnlineData(merged, mergedNames);
+            LastFetch = DateTime.Now;
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(CachePath));
+                List<string> lines = new List<string>();
+                foreach (KeyValuePair<DateTime, string> kv in merged)
+                    lines.Add(kv.Key.ToString("yyyy-MM-dd") + "|" + kv.Value + "|" +
+                        (mergedNames.ContainsKey(kv.Key) ? mergedNames[kv.Key] : ""));
+                lines.Sort();
+                File.WriteAllLines(CachePath, lines.ToArray());
+            }
+            catch { }
+            Settings.HolidaysFetchedAt = LastFetch.Value.ToString("yyyy-MM-dd HH:mm") + "（" + merged.Count + " 条）";
+            Settings.Save();
+            return true;
+        }
+
+        private static string HttpGet(string url, int timeoutMs)
+        {
+            try
+            {
+                var req = (HttpWebRequest)WebRequest.Create(url);
+                req.Timeout = timeoutMs;
+                req.ReadWriteTimeout = timeoutMs;
+                req.UserAgent = "ChinaClock/1.0";
+                using (var resp = (HttpWebResponse)req.GetResponse())
+                using (var sr = new StreamReader(resp.GetResponseStream()))
+                    return sr.ReadToEnd();
+            }
+            catch { return null; }
+        }
+    }
+
+    // ============================ 日程备忘 ============================
+
+    // 单条日程。三种来源（agenda.txt 每行一条）：
+    //   2026-11-05|提交周报      一次性
+    //   每年 05-20|结婚纪念日     公历每年重复
+    //   农历 08-15|妈妈生日       农历每年重复
+    // 内容开头可带 "HH:mm "（如 "15:00 例会"）→ 当天到点弹提醒（N1）
+    internal sealed class AgendaItem
+    {
+        public DateTime Date;                       // 一次性日程的日期；重复日程=发生日（运行时填充）
+        public int LunarMonth = -1, LunarDay = -1;  // 农历每年重复（正月=1，闰月不匹配）
+        public int SolarMonth = -1, SolarDay = -1;  // 公历每年重复
+        public string Text;
+        public string Time;                         // 行首 HH:mm 或 null
+        public int Seq;                             // 排序辅助（同日多条保持文件顺序）
+
+        public bool Yearly { get { return LunarMonth > 0 || SolarMonth > 0; } }
+
+        public AgendaItem Copy(DateTime occur)
+        {
+            AgendaItem c = new AgendaItem();
+            c.Date = occur;
+            c.LunarMonth = LunarMonth; c.LunarDay = LunarDay;
+            c.SolarMonth = SolarMonth; c.SolarDay = SolarDay;
+            c.Text = Text; c.Time = Time;
+            return c;
+        }
+    }
+
+    internal static class AgendaStore
+    {
+        private static List<AgendaItem> _items;
+        private static readonly Regex TimeRx = new Regex("^(\\d{1,2}:\\d{2})\\s*", RegexOptions.Compiled);
+
+        public static readonly string FilePath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ChinaClock", "agenda.txt");
+
+        public static void EnsureFile()
+        {
+            try
+            {
+                if (File.Exists(FilePath)) return;
+                Directory.CreateDirectory(Path.GetDirectoryName(FilePath));
+                File.WriteAllLines(FilePath, new[]
+                {
+                    "# 日程备忘（每行一条）：",
+                    "#   2026-11-05|提交周报        一次性日程",
+                    "#   每年 05-20|结婚纪念日      公历每年重复",
+                    "#   农历 08-15|妈妈生日        农历每年重复",
+                    "# 内容开头可带时间：2026-11-05|15:00 例会 → 当天 15:00 弹提醒",
+                });
+            }
+            catch { }
+        }
+
+        // 解析单行；格式不符返回 null（纯函数，自测覆盖）
+        internal static AgendaItem ParseLine(string line)
+        {
+            if (line == null) return null;
+            string t = line.Trim();
+            int i = t.IndexOf('|');
+            if (i <= 0) return null;
+            string left = t.Substring(0, i).Trim();
+            string text = t.Substring(i + 1).Trim();
+            if (text.Length == 0) return null;
+
+            AgendaItem it = new AgendaItem();
+            if (left.StartsWith("农历"))
+            {
+                string md = left.Substring(2).Trim();
+                int dash = md.IndexOf('-');
+                int m, d;
+                if (dash <= 0 || !int.TryParse(md.Substring(0, dash), out m) || !int.TryParse(md.Substring(dash + 1), out d)) return null;
+                if (m < 1 || m > 12 || d < 1 || d > 30) return null;
+                it.LunarMonth = m; it.LunarDay = d;
+            }
+            else if (left.StartsWith("每年") || left.StartsWith("公历"))
+            {
+                string md = left.Substring(2).Trim();
+                int dash = md.IndexOf('-');
+                int m, d;
+                if (dash <= 0 || !int.TryParse(md.Substring(0, dash), out m) || !int.TryParse(md.Substring(dash + 1), out d)) return null;
+                if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+                it.SolarMonth = m; it.SolarDay = d;
+            }
+            else
+            {
+                DateTime d;
+                if (!DateTime.TryParseExact(left, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out d)) return null;
+                it.Date = d.Date;
+            }
+
+            Match tm = TimeRx.Match(text);
+            if (tm.Success)
+            {
+                it.Time = tm.Groups[1].Value;
+                text = text.Substring(tm.Length).Trim();
+                if (text.Length == 0) return null;
+            }
+            it.Text = text;
+            return it;
+        }
+
+        private static void EnsureLoaded()
+        {
+            if (_items != null) return;
+            _items = new List<AgendaItem>();
+            try
+            {
+                EnsureFile();
+                int seq = 0;
+                foreach (string raw in File.ReadAllLines(FilePath))
+                {
+                    AgendaItem it = ParseLine(raw);
+                    if (it != null) { it.Seq = seq++; _items.Add(it); }
+                }
+            }
+            catch { }
+        }
+
+        public static void Reload() { _items = null; }
+
+        // 某条日程是否发生在 d（农历条目不匹配闰月）
+        private static bool OccursOn(AgendaItem it, DateTime d)
+        {
+            if (it.Yearly)
+            {
+                if (it.SolarMonth > 0) return d.Month == it.SolarMonth && d.Day == it.SolarDay;
+                int ly, lm, ld; bool leap;
+                CalendarData.LunarOf(d, out ly, out lm, out leap, out ld);
+                return !leap && lm == it.LunarMonth && ld == it.LunarDay;
+            }
+            return it.Date == d.Date;
+        }
+
+        public static bool Has(DateTime d)
+        {
+            EnsureLoaded();
+            foreach (AgendaItem it in _items) if (OccursOn(it, d)) return true;
+            return false;
+        }
+
+        // 某天全部日程文本（含农历/公历重复条目），供圆点与悬停提示
+        public static List<string> For(DateTime d)
+        {
+            EnsureLoaded();
+            List<string> list = new List<string>();
+            foreach (AgendaItem it in _items) if (OccursOn(it, d)) list.Add(it.Text);
+            return list;
+        }
+
+        // 某天全部条目（含重复），供提醒
+        public static List<AgendaItem> On(DateTime d)
+        {
+            EnsureLoaded();
+            List<AgendaItem> list = new List<AgendaItem>();
+            foreach (AgendaItem it in _items) if (OccursOn(it, d)) list.Add(it.Copy(d));
+            return list;
+        }
+
+        // [from, from+days) 内的发生记录，按日期+文件顺序排序（近期日程列表 N2）
+        public static List<AgendaItem> Upcoming(DateTime from, int days)
+        {
+            EnsureLoaded();
+            List<AgendaItem> list = new List<AgendaItem>();
+            int seq = 0;
+            for (DateTime d = from.Date; d < from.Date.AddDays(days); d = d.AddDays(1))
+                foreach (AgendaItem it in _items)
+                    if (OccursOn(it, d)) { AgendaItem c = it.Copy(d); c.Seq = seq++; list.Add(c); }
+            list.Sort(delegate(AgendaItem a, AgendaItem b)
+            {
+                int c = a.Date.CompareTo(b.Date);
+                return c != 0 ? c : a.Seq.CompareTo(b.Seq);
+            });
+            return list;
+        }
+
+        // 覆盖 d 当天的一次性日程（空列表=清除）；农历/每年重复条目不受影响
+        public static void Set(DateTime d, List<string> texts)
+        {
+            EnsureLoaded();
+            for (int i = _items.Count - 1; i >= 0; i--)
+                if (!_items[i].Yearly && _items[i].Date == d.Date) _items.RemoveAt(i);
+            if (texts != null)
+                foreach (string t in texts) { AgendaItem it = new AgendaItem(); it.Date = d.Date; it.Text = t; _items.Add(it); }
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(FilePath));
+                List<string> lines = new List<string>();
+                lines.Add("# 日程备忘（每行一条）：");
+                lines.Add("#   2026-11-05|提交周报        一次性日程");
+                lines.Add("#   每年 05-20|结婚纪念日      公历每年重复");
+                lines.Add("#   农历 08-15|妈妈生日        农历每年重复");
+                lines.Add("# 内容开头可带时间：2026-11-05|15:00 例会 → 当天 15:00 弹提醒");
+                foreach (AgendaItem it in _items) if (it.Yearly)
+                        lines.Add((it.LunarMonth > 0 ? "农历 " : "每年 ") +
+                            (it.LunarMonth > 0 ? it.LunarMonth.ToString("00-") + it.LunarDay.ToString("00")
+                                               : it.SolarMonth.ToString("00-") + it.SolarDay.ToString("00"))
+                            + "|" + it.Text);
+                List<AgendaItem> once = new List<AgendaItem>();
+                foreach (AgendaItem it in _items) if (!it.Yearly) once.Add(it);
+                once.Sort(delegate(AgendaItem a, AgendaItem b) { return a.Date.CompareTo(b.Date); });
+                foreach (AgendaItem it in once)
+                    lines.Add(it.Date.ToString("yyyy-MM-dd") + "|" + it.Text);
+                File.WriteAllLines(FilePath, lines.ToArray());
+            }
+            catch { }
         }
     }
 
@@ -169,6 +715,7 @@ namespace ChinaClock
         private static readonly Dictionary<int, DateTime> _cnyCache = new Dictionary<int, DateTime>();
         private static readonly Dictionary<int, DateTime[]> _termYearCache = new Dictionary<int, DateTime[]>();
         private static Dictionary<DateTime, string> _overrides;
+        private static Dictionary<DateTime, string> _online; // holiday-cn 在线假日数据（B1）
 
         public sealed class DayInfo
         {
@@ -201,7 +748,7 @@ namespace ChinaClock
             di.GanZhiMonth = GanZhiMonthName(d);
 
             string ov = OverrideFor(d);
-            // 角标优先级：holidays.txt 配置 > 法定假日 > 普通周末（周末也是休息日）
+            // 角标优先级：holidays.txt 手动配置 > 在线假日数据(B1) > 法定假日 > 普通周末（周末也是休息日）
             bool weekend = d.DayOfWeek == DayOfWeek.Saturday || d.DayOfWeek == DayOfWeek.Sunday;
             di.Badge = ov ?? (di.StatutoryRest || weekend ? "休" : null);
             return di;
@@ -430,7 +977,85 @@ namespace ChinaClock
         {
             if (_overrides == null) LoadOverrides();
             string s;
-            return _overrides.TryGetValue(d.Date, out s) ? s : null;
+            if (_overrides.TryGetValue(d.Date, out s)) return s;                    // 手动配置最高
+            if (_online != null && _online.TryGetValue(d.Date, out s)) return s;    // 在线数据次之
+            return null;
+        }
+
+        // holiday-cn 拉取的数据注入日历（B1/N4）：角标 + 节日名
+        private static Dictionary<DateTime, string> _onlineNames;
+        public static void SetOnlineData(Dictionary<DateTime, string> badges, Dictionary<DateTime, string> names)
+        {
+            _online = badges;
+            _onlineNames = names;
+        }
+
+        // 某天农历（N3：农历生日判定用）。正月=1
+        public static void LunarOf(DateTime d, out int y, out int m, out bool leap, out int day)
+        {
+            ToLunar(d, out y, out m, out leap, out day);
+        }
+
+        // 角标原因（N4）：在线数据携带的节日名 > 当天节日 > 内置法定名 > 周末/补班
+        public static string BadgeReason(DateTime d, string badge, string festival)
+        {
+            if (badge == null) return null;
+            string n;
+            if (_onlineNames != null && _onlineNames.TryGetValue(d.Date, out n) && !string.IsNullOrEmpty(n)) return n;
+            if (festival != null) return festival;
+            if (badge == "休")
+            {
+                string s = StatutoryName(d);
+                if (s != null) return s;
+                if (d.DayOfWeek == DayOfWeek.Saturday || d.DayOfWeek == DayOfWeek.Sunday) return "周末";
+            }
+            return badge == "班" ? "调休补班" : null;
+        }
+
+        // 内置法定假日对应的节日名（仅对 IsStatutoryRest=true 的日子有意义）
+        private static string StatutoryName(DateTime d)
+        {
+            if (!IsStatutoryRest(d)) return null;
+            if (d.Month == 1 && d.Day == 1) return "元旦";
+            if (d.Month == 5 && d.Day == 1) return "劳动节";
+            if (d.Month == 10 && d.Day == 1) return "国庆节";
+            if (d.Date == TermDate(d.Year, "清明")) return "清明";
+            int y, m, day; bool leap;
+            ToLunar(d, out y, out m, out leap, out day);
+            if (leap) return null;
+            if (m == 1 && day >= 1 && day <= 3) return "春节";
+            if (d.Date == CnyDate(y + 1).AddDays(-1)) return "除夕";
+            if (m == 5 && day == 5) return "端午";
+            if (m == 8 && day == 15) return "中秋";
+            return null;
+        }
+
+        // ISO-8601 周数（周一为一周起始、含首个周四的周为第 1 周）
+        public static int IsoWeek(DateTime d)
+        {
+            return CultureInfo.InvariantCulture.Calendar.GetWeekOfYear(d, CalendarWeekRule.FirstFourDayWeek, DayOfWeek.Monday);
+        }
+
+        // 解析 holiday-cn（NateScarlet/holiday-cn）年度 JSON：
+        // {"days":[{"name":"元旦","date":"2027-01-01","isOffDay":true},...]}
+        // 名称写入 names（N4 悬停提示用）
+        private static readonly Regex HolidayCnRx = new Regex(
+            "\"name\"\\s*:\\s*\"([^\"]*)\"\\s*,\\s*\"date\"\\s*:\\s*\"(\\d{4}-\\d{2}-\\d{2})\"\\s*,\\s*\"isOffDay\"\\s*:\\s*(true|false)",
+            RegexOptions.Compiled);
+
+        public static Dictionary<DateTime, string> ParseHolidayCn(string json, Dictionary<DateTime, string> names)
+        {
+            var dict = new Dictionary<DateTime, string>();
+            if (json == null) return dict;
+            foreach (Match m in HolidayCnRx.Matches(json))
+            {
+                DateTime d;
+                if (!DateTime.TryParseExact(m.Groups[2].Value, "yyyy-MM-dd",
+                        CultureInfo.InvariantCulture, DateTimeStyles.None, out d)) continue;
+                dict[d.Date] = m.Groups[3].Value == "true" ? "休" : "班";
+                if (names != null && !names.ContainsKey(d.Date)) names[d.Date] = m.Groups[1].Value;
+            }
+            return dict;
         }
 
         // 面板每次打开时刷新一次配置文件
@@ -458,16 +1083,26 @@ namespace ChinaClock
         private DateTime _viewMonth;  // 当前查看的月份
         private readonly Timer _timer = new Timer();
         private float _s = 1f;
-        private int _pad, _headerH, _weekH, _cellH, _cellW, _footerH;
+        private int _pad, _headerH, _titleH, _weekH, _cellH, _cellW, _footerH;
+        private int _offDate, _offInfo; // 头部日期行/农历行距头部顶端的物理偏移（按字体行高算得）
         private Font _fTime, _fDate, _fInfo, _fWeek, _fDay, _fSmall, _fFoot;
-        private Rectangle _gridRect, _btnPrev, _btnNext, _btnToday;
+        private Rectangle _gridRect, _btnTitlePrev, _btnTitleNext, _titleRect, _btnToday, _btnAgenda;
+        private int _pickMode;      // 中部层级：0=月历 1=选月 2=选年（十年区）3=近期日程列表
+        private int _pickYear;      // 选月/选年视图浏览的年份
+        private int _hot = -1;      // 悬停：-1 无 1=‹ 2=› 3=标题 4=回到今天 5=近期日程 10+i=选择器格子 100+i=日格 200+i=列表行
+        private int _wkCol;         // 周数列宽（B2，设置可关）
+        private ToolTip _tipPanel;  // 日程/角标悬停提示（B4/N4）
+        private DateTime _tipDay = DateTime.MinValue;
+        private AgendaEditor _editor; // 日程编辑窗（B4）
+        private bool _editOpen;       // 编辑期间面板不因失焦关闭
+        private List<AgendaItem> _listItems; // 近期日程列表数据（N2）
+        private int _listScroll;             // 列表滚过的行数
 
-        private readonly Color _cText = Color.FromArgb(51, 51, 51);
-        private readonly Color _cSub = Color.FromArgb(130, 130, 130);
-        private readonly Color _cRed = Color.FromArgb(224, 72, 62);
-        private readonly Color _cBlue = Color.FromArgb(58, 123, 213);
-        private readonly Color _cAccent = Color.FromArgb(68, 114, 196);
-        private readonly Color _cDim = Color.FromArgb(205, 205, 205);
+        // 配色由 PanelPalette 按主题/强调色生成（C1/C3）
+        private PanelPalette P;
+        private Color _cText, _cSub, _cRed, _cBlue, _cAccent, _cDim,
+            _cDimSub, _cSubLunar, _cSelBg, _cHover, _cBtnBg, _cBtnHot,
+            _cBorder, _cRestBg, _cRestFg, _cWorkBg, _cWorkFg, _cDot;
 
         public CalendarPanel()
         {
@@ -477,13 +1112,40 @@ namespace ChinaClock
             TopMost = true;
             KeyPreview = true;
             DoubleBuffered = true;
-            BackColor = Color.White;
 
             using (Graphics g = Graphics.FromHwnd(IntPtr.Zero)) _s = g.DpiX / 96f;
-            _pad = Scale(14); _headerH = Scale(88); _weekH = Scale(26);
-            _cellH = Scale(60); _cellW = Scale(58); _footerH = Scale(42);
-            int w = _pad * 2 + _cellW * 7;
-            int h = _pad + _headerH + _weekH + _cellH * 6 + _footerH + Scale(8);
+
+            // 主题与强调色（C1/C3）——面板每次打开重建，改设置后下次打开即生效
+            Settings.Load();
+            P = PanelPalette.Load();
+            BackColor = P.Back;
+            _cText = P.Text; _cSub = P.Sub; _cRed = P.Red; _cBlue = P.Blue; _cAccent = P.Accent; _cDim = P.Dim;
+            _cDimSub = P.DimSub; _cSubLunar = P.SubLunar; _cSelBg = P.SelBg; _cHover = P.Hover;
+            _cBtnBg = P.BtnBg; _cBtnHot = P.BtnHot; _cBorder = P.Border; _cDot = P.Dot;
+            _cRestBg = P.RestBg; _cRestFg = P.RestFg; _cWorkBg = P.WorkBg; _cWorkFg = P.WorkFg;
+
+            // 字体先行创建：头部三行按字体实际行高排版，固定 y 偏移在换字体/DPI 下会失真
+            // （与 kimi-cli 讨论结论：y时间=12，y日期=y时间+H时间+4，y农历=y日期+H日期+2，
+            //   头部高=y农历+H农历+6，各间隙为常量、行高用 MeasureText 实测）
+            _fTime = new Font("Segoe UI Semibold", 19F);
+            _fDate = new Font("Microsoft YaHei UI", 10.5F);
+            _fInfo = new Font("Microsoft YaHei UI", 9F);
+            _fWeek = new Font("Microsoft YaHei UI", 9.5F);
+            _fDay = new Font("Segoe UI", 10.5F, FontStyle.Bold);
+            _fSmall = new Font("Microsoft YaHei UI", 8.5F);
+            _fFoot = new Font("Microsoft YaHei UI", 9.5F);
+            int hTime = TextRenderer.MeasureText("00:00:00", _fTime).Height;
+            int hDate = TextRenderer.MeasureText("2026年11月4日 星期三", _fDate).Height;
+            int hInfo = TextRenderer.MeasureText("农历 九月廿六", _fInfo).Height;
+            _offDate = Scale(12) + hTime + Scale(4);
+            _offInfo = _offDate + hDate + Scale(2);
+            _headerH = _offInfo + hInfo + Scale(6);
+
+            _pad = Scale(14); _titleH = Scale(32); _weekH = Scale(28);
+            _cellH = Scale(60); _cellW = Scale(58); _footerH = Scale(40);
+            _wkCol = Settings.ShowWeekNumbers ? Scale(30) : 0;
+            int w = _pad * 2 + _wkCol + _cellW * 7;
+            int h = _pad + _headerH + _titleH + _weekH + _cellH * 6 + _footerH + Scale(8);
             Size = new Size(w, h);
             using (GraphicsPath p = RoundedPath(new Rectangle(0, 0, w - 1, h - 1), Scale(10)))
                 Region = new Region(p);
@@ -495,13 +1157,7 @@ namespace ChinaClock
             _selected = now.Date;
             _viewMonth = new DateTime(now.Year, now.Month, 1);
 
-            _fTime = new Font("Segoe UI Semibold", 19F);
-            _fDate = new Font("Microsoft YaHei UI", 10.5F);
-            _fInfo = new Font("Microsoft YaHei UI", 8.5F);
-            _fWeek = new Font("Microsoft YaHei UI", 9.5F);
-            _fDay = new Font("Segoe UI", 10.5F, FontStyle.Bold);
-            _fSmall = new Font("Microsoft YaHei UI", 8F);
-            _fFoot = new Font("Microsoft YaHei UI", 9.5F);
+            _tipPanel = new ToolTip { InitialDelay = 400, ReshowDelay = 300, ShowAlways = true };
 
             _timer.Interval = 500;
             _timer.Tick += delegate { Invalidate(); };
@@ -530,17 +1186,21 @@ namespace ChinaClock
         {
             base.OnLoad(e);
             CalendarData.ReloadOverrides();
+            AgendaStore.Reload(); // 每次打开面板刷新日程/节假日配置
         }
 
         protected override void OnKeyDown(KeyEventArgs e)
         {
             base.OnKeyDown(e);
-            if (e.KeyCode == Keys.Escape) Close();
+            if (e.KeyCode != Keys.Escape) return;
+            if (_pickMode != 0) { _pickMode = 0; Invalidate(); } // 先收起年月选择器，再关面板
+            else Close();
         }
 
         protected override void OnDeactivate(EventArgs e)
         {
             base.OnDeactivate(e);
+            if (_editOpen) return; // 日程编辑窗持有焦点时面板保持打开
             Close();
         }
 
@@ -549,24 +1209,247 @@ namespace ChinaClock
             base.OnMouseClick(e);
             if (e.Button != MouseButtons.Left) return;
             Point p = e.Location;
-            if (_btnPrev.Contains(p)) { _viewMonth = _viewMonth.AddMonths(-1); Invalidate(); return; }
-            if (_btnNext.Contains(p)) { _viewMonth = _viewMonth.AddMonths(1); Invalidate(); return; }
+            if (_btnTitlePrev.Contains(p)) { StepMonth(-1); return; }
+            if (_btnTitleNext.Contains(p)) { StepMonth(1); return; }
+            if (_titleRect.Contains(p))
+            {
+                if (_pickMode == 3) { _pickMode = 0; _hot = -1; Invalidate(); } // 列表视图：点标题返回月历
+                else DrillTitle();
+                return;
+            }
+            if (_btnAgenda.Contains(p)) { ToggleList(); return; } // N2：近期日程
             if (_btnToday.Contains(p)) { GoToday(); return; }
+            if (_pickMode == 3)
+            {
+                // 列表：点条目跳转那天；点空白收起
+                Rectangle a = PickArea();
+                int row = (p.Y - a.Y - Scale(6)) / Scale(26);
+                int idx = row + _listScroll;
+                if (row >= 0 && idx >= 0 && idx < _listItems.Count &&
+                    p.X >= a.X && p.X <= a.Right && a.Y + Scale(6) + row * Scale(26) + Scale(26) <= a.Bottom + Scale(26))
+                {
+                    DateTime d = _listItems[idx].Date;
+                    _viewMonth = new DateTime(d.Year, d.Month, 1);
+                    _selected = d;
+                    _pickMode = 0;
+                }
+                else _pickMode = 0;
+                _hot = -1;
+                Invalidate();
+                return;
+            }
+            if (_pickMode != 0) { PickClick(p); return; }
             if (_gridRect.Contains(p))
             {
-                int col = (p.X - _gridRect.X) / _cellW;
-                int row = (p.Y - _gridRect.Y) / _cellH;
-                _selected = GridStart().AddDays(row * 7 + col).Date;
+                int col = Math.Max(0, Math.Min(6, (p.X - _gridRect.X) / _cellW));
+                int row = Math.Max(0, Math.Min(5, (p.Y - _gridRect.Y) / _cellH));
+                DateTime d = GridStart().AddDays(row * 7 + col).Date;
+                if (e.Clicks >= 2) { OpenAgenda(d); return; } // B4：双击编辑日程
+                _selected = d;
                 Invalidate();
             }
         }
 
-        // 滚轮翻月：向下滚 = 下个月，向上滚 = 上个月（与主流日历一致）
+        // B4：双击日期打开日程编辑窗。
+        // 双击的第二次点击走 WM_LBUTTONDBLCLK → MouseDown(Clicks=2)，MouseClick 不一定带 2，
+        // 所以在这里检测（OnMouseClick 里的 e.Clicks>=2 分支保留兜底，OpenAgenda 幂等）
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left || e.Clicks < 2) return;
+            Point p = e.Location;
+            if (_pickMode == 0 && _gridRect.Contains(p))
+            {
+                int col = Math.Max(0, Math.Min(6, (p.X - _gridRect.X) / _cellW));
+                int row = Math.Max(0, Math.Min(5, (p.Y - _gridRect.Y) / _cellH));
+                OpenAgenda(GridStart().AddDays(row * 7 + col).Date);
+            }
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            int hot = HitHot(e.Location);
+            if (hot != _hot) { _hot = hot; Invalidate(); }
+            if (_pickMode == 0 && hot >= 100)
+            {
+                DateTime d = GridStart().AddDays(hot - 100);
+                UpdateDayTip(d);
+                Cursor = AgendaStore.Has(d) ? Cursors.Hand : Cursors.Default;
+            }
+            else
+            {
+                ClearDayTip();
+                Cursor = hot >= 0 ? Cursors.Hand : Cursors.Default;
+            }
+        }
+
+        // 日格悬停提示（N4 扩展）：日期 + 角标原因（节日名）+ 当天日程
+        // 仅在有日程或角标原因不是"周末"时显示，避免每个周末都冒提示
+        private void UpdateDayTip(DateTime d)
+        {
+            if (d == _tipDay) return;
+            _tipDay = d;
+            CalendarData.DayInfo di = CalendarData.Get(d);
+            string reason = CalendarData.BadgeReason(d, di.Badge, di.Festival);
+            List<string> agenda = AgendaStore.For(d);
+            if (agenda.Count == 0 && (reason == null || reason == "周末"))
+            {
+                _tipPanel.SetToolTip(this, "");
+                return;
+            }
+            List<string> lines = new List<string>();
+            lines.Add(d.ToString("M月d日 ") + WeekNames[((int)d.DayOfWeek + 6) % 7]);
+            if (reason != null) lines.Add(reason + (di.Badge == "班" ? "（补班）" : "（休）"));
+            foreach (string t in agenda) lines.Add("· " + t);
+            _tipPanel.SetToolTip(this, string.Join("\n", lines.ToArray()));
+        }
+
+        private void ClearDayTip()
+        {
+            if (_tipDay == DateTime.MinValue) return;
+            _tipDay = DateTime.MinValue;
+            _tipPanel.SetToolTip(this, "");
+        }
+
+        // B4：双击某天打开日程编辑窗（--agenda-demo 测试入口也会调用）
+        public void OpenAgenda(DateTime d)
+        {
+            if (_editor != null && !_editor.IsDisposed) { _editor.Activate(); return; }
+            _editOpen = true;
+            ClearDayTip();
+            _editor = new AgendaEditor(this, d);
+            _editor.Show();
+        }
+
+        // 由 AgendaEditor.FormClosed 回调：恢复焦点
+        public void EndAgendaEdit()
+        {
+            _editOpen = false;
+            _editor = null;
+            try { Activate(); }
+            catch { }
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            if (_hot != -1) { _hot = -1; Invalidate(); }
+            ClearDayTip();
+            Cursor = Cursors.Default;
+        }
+
+        // 标题栏 / 按钮 / 选择器格子 / 日格 / 列表行 的悬停命中（驱动手型光标与高亮）
+        private int HitHot(Point p)
+        {
+            if (_btnTitlePrev.Contains(p)) return 1;
+            if (_btnTitleNext.Contains(p)) return 2;
+            if (_titleRect.Contains(p)) return 3;
+            if (_btnToday.Contains(p)) return 4;
+            if (_btnAgenda.Contains(p)) return 5;
+            if (_pickMode == 3)
+            {
+                Rectangle a = PickArea();
+                int row = (p.Y - a.Y - Scale(6)) / Scale(26);
+                int idx = row + _listScroll;
+                if (row >= 0 && idx >= 0 && idx < _listItems.Count && p.X >= a.X && p.X <= a.Right)
+                    return 200 + idx;
+                return -1;
+            }
+            if (_pickMode == 0)
+            {
+                if (_gridRect.Contains(p))
+                {
+                    int col = Math.Max(0, Math.Min(6, (p.X - _gridRect.X) / _cellW));
+                    int row = Math.Max(0, Math.Min(5, (p.Y - _gridRect.Y) / _cellH));
+                    return 100 + row * 7 + col;
+                }
+                return -1;
+            }
+            for (int i = 0; i < 12; i++)
+                if (PickCell(i).Contains(p)) return 10 + i;
+            return -1;
+        }
+
+        // 滚轮：月历翻月；选月视图翻年；选年视图翻十年；列表视图滚动（下滚=向后）
         protected override void OnMouseWheel(MouseEventArgs e)
         {
             base.OnMouseWheel(e);
-            _viewMonth = _viewMonth.AddMonths(e.Delta < 0 ? 1 : -1);
+            if (_pickMode == 3)
+            {
+                int rowH = Scale(26);
+                int capacity = Math.Max(1, (PickArea().Height - Scale(12)) / rowH);
+                _listScroll = Math.Max(0, Math.Min(Math.Max(0, _listItems.Count - capacity),
+                    _listScroll + (e.Delta < 0 ? 2 : -2)));
+                Invalidate();
+                return;
+            }
+            StepMonth(e.Delta < 0 ? 1 : -1);
+        }
+
+        // ‹ › 按钮 / 滚轮共用的步进：按当前层级翻月/翻年/翻十年
+        // （年月限制在农历支持范围 1901–2100 内，越界直接忽略）
+        private void StepMonth(int dir)
+        {
+            if (_pickMode == 3) return; // 列表视图无翻页
+            if (_pickMode == 0)
+            {
+                DateTime t = _viewMonth.AddMonths(dir);
+                if (t.Year < 1901 || t.Year > 2100) return;
+                _viewMonth = t;
+            }
+            else
+            {
+                int y = _pickYear + dir * (_pickMode == 2 ? 10 : 1);
+                if (y < 1901 || y > 2100) return;
+                _pickYear = y;
+            }
             Invalidate();
+        }
+
+        // 点标题逐级切换：月历 → 选月 → 选年 → 返回选月
+        // （Windows 自带日历 / WinUI CalendarView / v-calendar 等主流日历的通用做法：
+        //   标题即当前层级名，点击上钻；从上层选中一项则下钻返回）
+        private void DrillTitle()
+        {
+            if (_pickMode == 0) { _pickMode = 1; _pickYear = _viewMonth.Year; }
+            else _pickMode = _pickMode == 1 ? 2 : 1;
+            _hot = -1;
+            Invalidate();
+        }
+
+        // 底部"近期日程"按钮（N2）：在月历与列表视图间切换（--list-demo 也会调用）
+        public void ToggleList()
+        {
+            if (_pickMode == 3) _pickMode = 0;
+            else
+            {
+                _pickMode = 3;
+                _listItems = AgendaStore.Upcoming(Now().Date, 14);
+                _listScroll = 0;
+            }
+            _hot = -1;
+            Invalidate();
+        }
+
+        // 点击选择器格子以外（头部/底部/缝隙）视为放弃选择，收起回月历
+        private void PickClick(Point p)
+        {
+            for (int i = 0; i < 12; i++)
+            {
+                if (!PickCell(i).Contains(p)) continue;
+                if (_pickMode == 1) { _viewMonth = new DateTime(_pickYear, i + 1, 1); _pickMode = 0; }
+                else
+                {
+                    int y = DecadeStart() - 1 + i;
+                    if (y < 1901 || y > 2100) return; // 农历支持范围外不响应
+                    _pickYear = y; _pickMode = 1;
+                }
+                _hot = -1;
+                Invalidate();
+                return;
+            }
+            _pickMode = 0; _hot = -1; Invalidate();
         }
 
         private DateTime GridStart()
@@ -575,11 +1458,30 @@ namespace ChinaClock
             return first.AddDays(-(((int)first.DayOfWeek + 6) % 7)); // 周一起始
         }
 
+        // ---- 年月选择视图几何（与 DrawPickCell 的绘制严格一致）----
+
+        // 格子区占满星期表头 + 网格区（层级名由顶部标题栏承担，不再另设头部行）
+        private Rectangle PickArea()
+        {
+            return new Rectangle(_pad, _pad + _headerH + _titleH, _cellW * 7, _weekH + _cellH * 6);
+        }
+
+        // 12 个格子（4 列 × 3 行）：选月视图=1~12月；选年视图=十年区前一年~后一年（两端灰显）
+        private Rectangle PickCell(int i)
+        {
+            Rectangle a = PickArea();
+            int cw = a.Width / 4, ch = a.Height / 3;
+            return new Rectangle(a.X + cw * (i % 4), a.Y + ch * (i / 4), cw, ch);
+        }
+
+        private int DecadeStart() { return _pickYear - _pickYear % 10; }
+
         private void GoToday()
         {
             DateTime n = Now().Date;
             _selected = n;
             _viewMonth = new DateTime(n.Year, n.Month, 1);
+            _pickMode = 0;
             Invalidate();
         }
 
@@ -590,47 +1492,169 @@ namespace ChinaClock
             g.SmoothingMode = SmoothingMode.AntiAlias;
             int w = ClientSize.Width;
 
-            using (Pen pen = new Pen(Color.FromArgb(226, 226, 226)))
+            using (Pen pen = new Pen(P.Border))
                 g.DrawPath(pen, RoundedPath(new Rectangle(0, 0, w - 1, ClientSize.Height - 1), Scale(10)));
 
-            // 头部：中国时间 + 选中日期 + 农历干支
+            // 头部：中国时间 + 选中日期 + 农历干支（三行间距按字体行高排布）
             CalendarData.DayInfo di = CalendarData.Get(_selected);
             int x = _pad, y = _pad;
-            TextRenderer.DrawText(g, Now().ToString("HH:mm:ss"), _fTime, new Point(x, y), _cText);
+            TextRenderer.DrawText(g, Now().ToString("HH:mm:ss"), _fTime, new Point(x, y + Scale(12)), _cText);
             string dateLine = _selected.ToString("yyyy年M月d日 ") + WeekFull[(int)_selected.DayOfWeek]
                 + (_selected == Now().Date ? "　今天" : "");
-            TextRenderer.DrawText(g, dateLine, _fDate, new Point(x, y + Scale(36)), _cText);
+            TextRenderer.DrawText(g, dateLine, _fDate, new Point(x, y + _offDate), _cText);
             string infoLine = "农历 " + di.LunarFullText + " · " + di.GanZhiYear + di.Animal + "年 · "
                 + di.GanZhiMonth + "月 · " + di.GanZhiDay + "日";
             if (di.Badge != null) infoLine += "　" + di.Badge;
-            TextRenderer.DrawText(g, infoLine, _fInfo, new Point(x, y + Scale(60)), _cSub);
+            TextRenderer.DrawText(g, infoLine, _fInfo, new Point(x, y + _offInfo), _cSub);
 
-            // 星期表头（周一起始）
-            int gy = _pad + _headerH;
-            _gridRect = new Rectangle(_pad, gy + _weekH, _cellW * 7, _cellH * 6);
-            for (int i = 0; i < 7; i++)
+            // 标题栏：‹ 标题 ›。标题即当前层级名（月历/选月/选年），点击逐级切换；
+            // ‹ › 按当前层级翻页——与 Windows 自带日历、WinUI CalendarView、v-calendar 一致
+            int ty = _pad + _headerH;
+            _btnTitlePrev = new Rectangle(_pad, ty, Scale(32), _titleH);
+            _btnTitleNext = new Rectangle(_pad + _wkCol + _cellW * 7 - Scale(32), ty, Scale(32), _titleH);
+            _titleRect = new Rectangle(_btnTitlePrev.Right + Scale(2), ty,
+                _btnTitleNext.Left - _btnTitlePrev.Right - Scale(4), _titleH);
+            string title = _pickMode == 0 ? _viewMonth.ToString("yyyy年M月")
+                : _pickMode == 1 ? _pickYear + "年"
+                : _pickMode == 2 ? DecadeStart() + " - " + (DecadeStart() + 9)
+                : "近期日程";
+            if (_hot == 3) FillHover(g, _titleRect);
+            TextRenderer.DrawText(g, title, _fDate, _titleRect, _cText,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            DrawGlyphButton(g, _btnTitlePrev, "‹", _hot == 1);
+            DrawGlyphButton(g, _btnTitleNext, "›", _hot == 2);
+
+            // 中部：星期表头 + 月历网格；或年月选择视图
+            int gy = _pad + _headerH + _titleH;
+            _gridRect = new Rectangle(_pad + _wkCol, gy + _weekH, _cellW * 7, _cellH * 6);
+            if (_pickMode == 0)
             {
-                Rectangle r = new Rectangle(_pad + _cellW * i, gy, _cellW, _weekH);
-                TextRenderer.DrawText(g, WeekNames[i], _fWeek, r, i >= 5 ? _cRed : _cSub,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                // 星期表头（周一起始）
+                for (int i = 0; i < 7; i++)
+                {
+                    Rectangle r = new Rectangle(_pad + _wkCol + _cellW * i, gy, _cellW, _weekH);
+                    TextRenderer.DrawText(g, WeekNames[i], _fWeek, r, i >= 5 ? _cRed : _cSub,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                }
+                // 周数列（B2）：每行取该行周四的 ISO 周数
+                if (_wkCol > 0)
+                {
+                    TextRenderer.DrawText(g, "周", _fSmall, new Rectangle(_pad, gy, _wkCol - Scale(6), _weekH), _cSub,
+                        TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
+                    DateTime start = GridStart();
+                    for (int row = 0; row < 6; row++)
+                    {
+                        Rectangle rc = new Rectangle(_pad, _gridRect.Y + _cellH * row, _wkCol - Scale(6), _cellH);
+                        TextRenderer.DrawText(g, CalendarData.IsoWeek(start.AddDays(row * 7 + 3)).ToString(),
+                            _fSmall, rc, _cSub,
+                            TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
+                    }
+                }
+                DateTime gridStart = GridStart();
+                for (int i = 0; i < 42; i++)
+                    DrawCell(g, i % 7, i / 7, gridStart.AddDays(i));
+            }
+            else
+            {
+                DrawPicker(g);
             }
 
-            DateTime start = GridStart();
-            for (int i = 0; i < 42; i++)
-                DrawCell(g, i % 7, i / 7, start.AddDays(i));
-
-            // 底部：月份切换 + 回到今天
+            // 底部：近期日程（N2） + 回到今天
             int fy = _gridRect.Bottom + Scale(6);
-            _btnPrev = new Rectangle(x, fy, Scale(28), Scale(24));
-            _btnNext = new Rectangle(x + Scale(32), fy, Scale(28), Scale(24));
-            _btnToday = new Rectangle(w - _pad - Scale(76), fy, Scale(76), Scale(24));
-            DrawMiniButton(g, _btnPrev, "‹");
-            DrawMiniButton(g, _btnNext, "›");
-            DrawMiniButton(g, _btnToday, "回到今天");
-            Rectangle labelRect = new Rectangle(_btnNext.Right + Scale(10), fy,
-                _btnToday.Left - _btnNext.Right - Scale(20), _btnToday.Height);
-            TextRenderer.DrawText(g, _viewMonth.ToString("yyyy年M月"), _fFoot, labelRect, _cText,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            _btnAgenda = new Rectangle(_pad, fy, Scale(84), Scale(28));
+            _btnToday = new Rectangle(w - _pad - Scale(80), fy, Scale(80), Scale(28));
+            DrawMiniButton(g, _btnAgenda, "近期日程", _hot == 5);
+            DrawMiniButton(g, _btnToday, "回到今天", _hot == 4);
+        }
+
+        // 年月选择视图：选月=当年 12 个月；选年=十年区 12 年（层级名在顶部标题栏）
+        private void DrawPicker(Graphics g)
+        {
+            if (_pickMode == 3) { DrawAgendaList(g); return; } // N2：近期日程列表
+            for (int i = 0; i < 12; i++) DrawPickCell(g, i);
+        }
+
+        // N2：近期日程列表（未来 14 天，滚轮滚动，点条目跳转当天）
+        private void DrawAgendaList(Graphics g)
+        {
+            Rectangle a = PickArea();
+            int rowH = Scale(26);
+            int top = a.Y + Scale(6);
+            if (_listItems.Count == 0)
+            {
+                Rectangle all = new Rectangle(a.X, a.Y, a.Width, a.Height);
+                TextRenderer.DrawText(g, "未来 14 天没有日程", _fWeek, all, _cSub,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                return;
+            }
+            g.SetClip(a);
+            int skip = _listScroll;
+            for (int i = skip; i < _listItems.Count; i++)
+            {
+                int row = i - skip;
+                int y = top + row * rowH;
+                if (y + rowH > a.Bottom) break;
+                AgendaItem it = _listItems[i];
+                Rectangle rr = new Rectangle(a.X + Scale(6), y, a.Width - Scale(12), rowH);
+                if (_hot == 200 + i)
+                    using (SolidBrush b = new SolidBrush(_cHover))
+                        g.FillPath(b, RoundedPath(rr, Scale(4)));
+                bool today = it.Date == Now().Date;
+                string chip = today ? "今天" : it.Date == Now().Date.AddDays(1) ? "明天"
+                    : it.Date.ToString("M/d ") + WeekNames[((int)it.Date.DayOfWeek + 6) % 7];
+                TextRenderer.DrawText(g, chip, _fSmall,
+                    new Rectangle(rr.X, rr.Y, Scale(64), rowH),
+                    today ? _cAccent : _cSub,
+                    TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
+                TextRenderer.DrawText(g, it.Text, _fWeek,
+                    new Rectangle(rr.X + Scale(72), rr.Y, rr.Width - Scale(72), rowH),
+                    _cText,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            }
+            g.ResetClip();
+        }
+
+        private void DrawPickCell(Graphics g, int i)
+        {
+            Rectangle r = PickCell(i);
+            string text; bool view, now, dim = false;
+            if (_pickMode == 1)
+            {
+                text = (i + 1) + "月";
+                view = _viewMonth.Year == _pickYear && _viewMonth.Month == i + 1;
+                now = Now().Year == _pickYear && Now().Month == i + 1;
+            }
+            else
+            {
+                int y = DecadeStart() - 1 + i;
+                text = y.ToString();
+                dim = i == 0 || i == 11;
+                view = _viewMonth.Year == y;
+                now = Now().Year == y;
+            }
+            if (view) // 当前查看的月/年：强调色浅底圆角
+                using (SolidBrush b = new SolidBrush(_cSelBg))
+                    g.FillPath(b, RoundedPath(r, Scale(8)));
+            else if (_hot == 10 + i)
+                FillHover(g, r);
+            Color c = dim ? _cDim : now ? _cAccent : _cText;
+            TextRenderer.DrawText(g, text, _fWeek, r, c,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        }
+
+        // 悬停高亮底（圆角矩形）
+        private void FillHover(Graphics g, Rectangle r)
+        {
+            using (SolidBrush b = new SolidBrush(_cHover))
+                g.FillPath(b, RoundedPath(r, Scale(6)));
+        }
+
+        // 标题栏翻页按钮：平时仅 ‹ › 字形，悬停补圆角底（与主流日历一致）
+        private void DrawGlyphButton(Graphics g, Rectangle r, string glyph, bool hot)
+        {
+            if (hot) FillHover(g, r);
+            TextRenderer.DrawText(g, glyph, _fWeek, r, _cText,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
         }
 
         private void DrawCell(Graphics g, int col, int row, DateTime d)
@@ -641,16 +1665,16 @@ namespace ChinaClock
             bool weekend = d.DayOfWeek == DayOfWeek.Saturday || d.DayOfWeek == DayOfWeek.Sunday;
 
             if (d == _selected)
-                using (SolidBrush b = new SolidBrush(Color.FromArgb(238, 243, 252)))
+                using (SolidBrush b = new SolidBrush(_cSelBg))
                     g.FillRectangle(b, r);
 
             bool workBadge = di.Badge == "班"; // 调休补班的周末按工作日着色
             Color numColor = other ? _cDim : (workBadge ? _cText : (di.StatutoryRest || weekend ? _cRed : _cText));
             string sub = di.Festival ?? di.TermName ?? di.LunarText;
-            Color subColor = other ? Color.FromArgb(222, 222, 222)
+            Color subColor = other ? _cDimSub
                 : di.Festival != null ? _cRed
                 : di.TermName != null ? _cBlue
-                : Color.FromArgb(166, 166, 166);
+                : _cSubLunar;
 
             Rectangle numRect = new Rectangle(r.X, r.Y + Scale(6), r.Width, Scale(22));
             if (d == Now().Date)
@@ -665,19 +1689,27 @@ namespace ChinaClock
                 TextRenderer.DrawText(g, d.Day.ToString(), _fDay, numRect, numColor, TextFormatFlags.HorizontalCenter);
             }
 
-            Rectangle subRect = new Rectangle(r.X, r.Y + Scale(30), r.Width, Scale(16));
+            Rectangle subRect = new Rectangle(r.X, r.Y + Scale(32), r.Width, Scale(16));
             TextRenderer.DrawText(g, sub, _fSmall, subRect, subColor,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.EndEllipsis);
 
             if (!other && di.Badge != null)
             {
                 bool work = di.Badge == "班";
-                Color bg = work ? Color.FromArgb(255, 243, 224) : Color.FromArgb(253, 236, 234);
-                Color fg = work ? Color.FromArgb(230, 126, 34) : _cRed;
-                Rectangle br = new Rectangle(r.Right - Scale(20), r.Y + Scale(3), Scale(17), Scale(13));
+                Color bg = work ? _cWorkBg : _cRestBg;
+                Color fg = work ? _cWorkFg : _cRestFg;
+                Rectangle br = new Rectangle(r.Right - Scale(20), r.Y + Scale(2), Scale(18), Scale(16));
                 using (SolidBrush b = new SolidBrush(bg)) g.FillRectangle(b, br);
                 TextRenderer.DrawText(g, di.Badge, _fSmall, br, fg,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            }
+
+            // B4：有日程的日子在格底画圆点
+            if (!other && AgendaStore.Has(d))
+            {
+                int dsz = Scale(5);
+                using (SolidBrush b = new SolidBrush(_cDot))
+                    g.FillEllipse(b, r.X + (r.Width - dsz) / 2, r.Bottom - Scale(10), dsz, dsz);
             }
         }
 
@@ -697,10 +1729,10 @@ namespace ChinaClock
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.SystemDefault;
         }
 
-        private void DrawMiniButton(Graphics g, Rectangle r, string text)
+        private void DrawMiniButton(Graphics g, Rectangle r, string text, bool hot)
         {
-            using (SolidBrush b = new SolidBrush(Color.FromArgb(243, 244, 246)))
-                g.FillRectangle(b, r);
+            using (SolidBrush b = new SolidBrush(hot ? _cBtnHot : _cBtnBg))
+                g.FillPath(b, RoundedPath(r, Scale(6)));
             TextRenderer.DrawText(g, text, _fFoot, r, _cText,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
         }
@@ -722,14 +1754,534 @@ namespace ChinaClock
         {
             _timer.Stop();
             _timer.Dispose();
+            _tipPanel.Dispose();
+            if (_editor != null && !_editor.IsDisposed) _editor.Dispose();
             foreach (Font f in new[] { _fTime, _fDate, _fInfo, _fWeek, _fDay, _fSmall, _fFoot })
                 if (f != null) f.Dispose();
             base.OnFormClosed(e);
         }
     }
 
-    // ============================ 任务栏时钟 ============================
+    // ============================ 圆角按钮 ============================
 
+    // 自绘圆角按钮：Primary=强调色实底白字；Neutral=中性底+边框。悬停加深。
+    internal sealed class RoundButton : Control
+    {
+        public bool Primary;
+        public Color Accent, TextC, NeutralBg, NeutralBorder;
+
+        public RoundButton()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            Cursor = Cursors.Hand;
+            TabStop = false;
+        }
+
+        private bool _hot, _pressed;
+        protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); _hot = true; Invalidate(); }
+        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); _hot = false; _pressed = false; Invalidate(); }
+        protected override void OnMouseDown(MouseEventArgs e) { base.OnMouseDown(e); _pressed = true; Invalidate(); }
+        protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); _pressed = false; Invalidate(); }
+
+        private static GraphicsPath Rounded(Rectangle r, int rad)
+        {
+            var p = new GraphicsPath();
+            int d = rad * 2;
+            if (d < 2 || r.Width < d || r.Height < d) { p.AddRectangle(r); return p; }
+            p.AddArc(r.X, r.Y, d, d, 180, 90);
+            p.AddArc(r.Right - d - 1, r.Y, d, d, 270, 90);
+            p.AddArc(r.Right - d - 1, r.Bottom - d - 1, d, d, 0, 90);
+            p.AddArc(r.X, r.Bottom - d - 1, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            Rectangle r = new Rectangle(0, 0, Width - 1, Height - 1);
+            using (GraphicsPath p = Rounded(r, 6))
+            {
+                if (Primary)
+                {
+                    // kimi 规范：悬停加深 8%，按下加深 16%
+                    Color fill = _pressed ? PanelPalette.Blend(Accent, Color.Black, 0.16f)
+                        : _hot ? PanelPalette.Blend(Accent, Color.Black, 0.08f) : Accent;
+                    using (SolidBrush b = new SolidBrush(fill)) g.FillPath(b, p);
+                }
+                else
+                {
+                    using (SolidBrush b = new SolidBrush(_hot ? PanelPalette.Blend(NeutralBg, Color.Black, 0.08f) : NeutralBg))
+                        g.FillPath(b, p);
+                    using (Pen pen = new Pen(_hot ? PanelPalette.Blend(NeutralBorder, Color.Black, 0.12f) : NeutralBorder))
+                        g.DrawPath(pen, p);
+                }
+            }
+            TextRenderer.DrawText(g, Text, Font, r, TextC,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        }
+    }
+
+    // ============================ 日程编辑窗 ============================
+
+    // 无边框圆角小窗，深浅色跟随面板；视觉规范来自 kimi-cli 讨论：
+    // 窗体 344×264 圆角10；标题栏 48（标题 + 32×32 字形关闭钮）；
+    // 编辑容器 312×144（底 #FAFAFA/#282828 圆角6，无边框 TextBox 内嵌，空内容显示占位）；
+    // 底部 [取消 72×32 次按钮] [保存 80×32 主按钮=强调色]；Esc=取消、Ctrl+Enter=保存、Enter=换行
+    internal sealed class AgendaEditor : Form
+    {
+        private readonly DateTime _day;
+        private readonly CalendarPanel _owner;
+        private readonly TextBox _box;
+        private readonly Label _placeholder;
+        private readonly PanelPalette P;
+        private readonly Color _subC, _phC, _closeHotBg;
+        private readonly Font _fTitle, _fClose, _fBtn;
+        private bool _closeHot;
+        private Rectangle _closeRect;
+
+        [DllImport("user32.dll")] private static extern bool ReleaseCapture();
+        [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        public AgendaEditor(CalendarPanel owner, DateTime day)
+        {
+            _owner = owner;
+            _day = day.Date;
+            P = PanelPalette.Load();
+            FormBorderStyle = FormBorderStyle.None;
+            StartPosition = FormStartPosition.Manual;
+            ShowInTaskbar = false;
+            TopMost = true;
+            DoubleBuffered = true;
+            BackColor = P.Back;
+            ClientSize = new Size(344, 264);
+            using (GraphicsPath p = RoundedPath(new Rectangle(0, 0, 343, 263), 10))
+                Region = new Region(p);
+
+            // 深浅两套补充色（kimi 规范值）
+            Color boxBg = P.Dark ? Color.FromArgb(40, 40, 40) : Color.FromArgb(250, 250, 250);
+            Color boxBorder = P.Dark ? Color.FromArgb(72, 72, 72) : Color.FromArgb(216, 216, 216);
+            _subC = P.Dark ? Color.FromArgb(168, 168, 168) : Color.FromArgb(107, 107, 107);
+            _phC = P.Dark ? Color.FromArgb(133, 133, 133) : Color.FromArgb(154, 154, 154);
+            _closeHotBg = P.Dark ? Color.FromArgb(56, 56, 56) : Color.FromArgb(228, 231, 236);
+            _fTitle = new Font("Microsoft YaHei UI", 10.5F);
+            _fClose = new Font("Segoe UI", 12F);
+            _fBtn = new Font("Microsoft YaHei UI", 9F);
+
+            // 编辑容器
+            Panel box = new Panel();
+            box.Location = new Point(16, 52);
+            box.Size = new Size(312, 144);
+            box.Paint += delegate(object s, PaintEventArgs e2)
+            {
+                Graphics g = e2.Graphics;
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                Rectangle rb = new Rectangle(0, 0, box.Width - 1, box.Height - 1);
+                using (GraphicsPath p = RoundedPath(rb, 6))
+                {
+                    using (SolidBrush b = new SolidBrush(boxBg)) g.FillPath(b, p);
+                    using (Pen pen = new Pen(boxBorder)) g.DrawPath(pen, p);
+                }
+            };
+            Controls.Add(box);
+
+            _box = new TextBox();
+            _box.BorderStyle = BorderStyle.None;
+            _box.Multiline = true;
+            _box.ScrollBars = ScrollBars.Vertical;
+            _box.Font = new Font("Microsoft YaHei UI", 10F);
+            _box.BackColor = boxBg;
+            _box.ForeColor = P.Text;
+            _box.Location = new Point(12, 10);
+            _box.Size = new Size(288, 124);
+            _box.Text = string.Join("\r\n", AgendaStore.For(_day).ToArray());
+            box.Controls.Add(_box);
+
+            // 占位提示：空内容时显示，输入即消失；点击占位聚焦输入框
+            _placeholder = new Label();
+            _placeholder.Text = "输入日程内容…";
+            _placeholder.Font = new Font("Microsoft YaHei UI", 9F);
+            _placeholder.ForeColor = _phC;
+            _placeholder.BackColor = boxBg;
+            _placeholder.AutoSize = false;
+            _placeholder.Size = new Size(200, 24);
+            _placeholder.Location = new Point(13, 11);
+            _placeholder.Cursor = Cursors.IBeam;
+            _placeholder.Visible = _box.Text.Length == 0;
+            _placeholder.MouseDown += delegate { _box.Focus(); };
+            box.Controls.Add(_placeholder);
+            _box.TextChanged += delegate { _placeholder.Visible = _box.Text.Length == 0; };
+
+            // 底部按钮：保存（主）+ 取消（次）
+            RoundButton btnCancel = new RoundButton();
+            btnCancel.Text = "取消";
+            btnCancel.Font = _fBtn;
+            btnCancel.Size = new Size(72, 32);
+            btnCancel.Location = new Point(168, 216);
+            btnCancel.Primary = false;
+            btnCancel.NeutralBg = P.Back;
+            btnCancel.NeutralBorder = boxBorder;
+            btnCancel.TextC = _subC;
+            btnCancel.Accent = P.Accent;
+            btnCancel.Click += delegate { Close(); };
+            Controls.Add(btnCancel);
+
+            RoundButton btnSave = new RoundButton();
+            btnSave.Text = "保存";
+            btnSave.Font = _fBtn;
+            btnSave.Size = new Size(80, 32);
+            btnSave.Location = new Point(248, 216);
+            btnSave.Primary = true;
+            btnSave.Accent = P.Accent;
+            btnSave.TextC = Color.White;
+            btnSave.Click += delegate { Save(); };
+            Controls.Add(btnSave);
+
+            _closeRect = new Rectangle(ClientSize.Width - 16 - 32, 8, 32, 32);
+
+            // 定位在面板上方、右对齐；越界夹回工作区
+            var wa = Screen.FromControl(owner).WorkingArea;
+            Point tl = owner.PointToScreen(Point.Empty);
+            int x = tl.X + owner.ClientSize.Width - Width - 12;
+            int y = tl.Y - Height - 10;
+            Location = new Point(
+                Math.Max(wa.Left + 4, Math.Min(x, wa.Right - Width - 4)),
+                Math.Max(wa.Top + 4, Math.Min(y, wa.Bottom - Height - 4)));
+
+            Shown += delegate
+            {
+                _box.Focus();
+                _box.SelectionStart = _box.TextLength; // 光标落末尾，避免预填内容呈全选蓝底
+            };
+            FormClosed += delegate { _owner.EndAgendaEdit(); };
+        }
+
+        private static GraphicsPath RoundedPath(Rectangle r, int rad)
+        {
+            var p = new GraphicsPath();
+            int d = rad * 2;
+            if (d < 2 || r.Width < d || r.Height < d) { p.AddRectangle(r); return p; }
+            p.AddArc(r.X, r.Y, d, d, 180, 90);
+            p.AddArc(r.Right - d - 1, r.Y, d, d, 270, 90);
+            p.AddArc(r.Right - d - 1, r.Bottom - d - 1, d, d, 0, 90);
+            p.AddArc(r.X, r.Bottom - d - 1, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (GraphicsPath p = RoundedPath(new Rectangle(0, 0, ClientSize.Width - 1, ClientSize.Height - 1), 10))
+            using (Pen pen = new Pen(P.Border))
+                g.DrawPath(pen, p);
+            // 标题（48px 标题栏，左 16 垂直居中）
+            TextRenderer.DrawText(g, _day.ToString("M月d日") + " 日程备忘", _fTitle,
+                new Rectangle(16, 0, 240, 48), P.Text,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            // 关闭按钮：轻量字形 ×，悬停补圆角底（不用系统红）
+            if (_closeHot)
+                using (SolidBrush b = new SolidBrush(_closeHotBg))
+                    g.FillPath(b, RoundedPath(_closeRect, 6));
+            TextRenderer.DrawText(g, "×", _fClose, _closeRect, _closeHot ? P.Text : _subC,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            bool hot = _closeRect.Contains(e.Location);
+            if (hot != _closeHot) { _closeHot = hot; Invalidate(); }
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            if (_closeHot) { _closeHot = false; Invalidate(); }
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left) return;
+            if (_closeRect.Contains(e.Location)) { Close(); return; }
+            if (e.Y < 48)
+            {
+                // 标题栏拖动
+                ReleaseCapture();
+                SendMessage(Handle, 0xA1, (IntPtr)2, IntPtr.Zero);
+            }
+        }
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (keyData == Keys.Escape) { Close(); return true; }
+            if (keyData == (Keys.Control | Keys.Enter)) { Save(); return true; }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        private void Save()
+        {
+            List<string> items = new List<string>();
+            foreach (string raw in _box.Lines)
+            {
+                string t = raw.Trim();
+                if (t.Length > 0) items.Add(t);
+            }
+            AgendaStore.Set(_day, items);
+            _owner.Invalidate();
+            Close();
+        }
+    }
+
+    // ============================ 设置窗口 ============================
+
+    // C2：时钟格式 / 第二时区 / 周数 / 主题 / 强调色 / 假日数据 / 日程 / 自启
+    internal sealed class SettingsForm : Form
+    {
+        private readonly ClockForm _clock;
+        private CheckBox _cbSeconds, _cbWeekday, _cbDateLine, _cbTz2, _cbWeekNum, _cbAutoFetch, _cbAutoStart;
+        private TextBox _tbFormat, _tbTzLabel;
+        private ComboBox _cboTz;
+        private RadioButton _rbFollow, _rbLight, _rbDark;
+        private Label _lblFetch;
+        private string _accent;
+
+        private static readonly SettingsForm.TzItem[] TzOptions =
+        {
+            new SettingsForm.TzItem("协调世界时", "UTC"),
+            new SettingsForm.TzItem("伦敦", "GMT Standard Time"),
+            new SettingsForm.TzItem("纽约", "Eastern Standard Time"),
+            new SettingsForm.TzItem("洛杉矶", "Pacific Standard Time"),
+            new SettingsForm.TzItem("东京", "Tokyo Standard Time"),
+            new SettingsForm.TzItem("新加坡", "Singapore Standard Time"),
+            new SettingsForm.TzItem("悉尼", "AUS Eastern Standard Time"),
+            new SettingsForm.TzItem("曼谷", "SE Asia Standard Time"),
+            new SettingsForm.TzItem("迪拜", "Arabian Standard Time"),
+            new SettingsForm.TzItem("莫斯科", "Russia Time Zone 3"),
+        };
+
+        private class TzItem
+        {
+            public string Label, Id;
+            public TzItem(string label, string id) { Label = label; Id = id; }
+            public override string ToString() { return Label + "（" + Id + "）"; }
+        }
+
+        public SettingsForm(ClockForm clock)
+        {
+            _clock = clock;
+            _accent = Settings.Accent;
+            Text = "中国时间 · 设置";
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.Manual;
+            ClientSize = new Size(474, 566);
+            BackColor = Color.White;
+            Font = new Font("Microsoft YaHei UI", 9F);
+            var wa = Screen.PrimaryScreen.WorkingArea;
+            Location = new Point(wa.Right - Width - 24, wa.Bottom - Height - 48);
+
+            // ---- 时钟显示 ----
+            GroupBox g1 = new GroupBox();
+            g1.Text = "时钟显示";
+            g1.Location = new Point(12, 10);
+            g1.Size = new Size(450, 152);
+            _cbSeconds = new CheckBox();
+            _cbSeconds.Text = "显示秒"; _cbSeconds.Location = new Point(16, 26); _cbSeconds.AutoSize = true; _cbSeconds.Checked = Settings.ShowSeconds;
+            _cbWeekday = new CheckBox();
+            _cbWeekday.Text = "显示星期"; _cbWeekday.Location = new Point(112, 26); _cbWeekday.AutoSize = true; _cbWeekday.Checked = Settings.ShowWeekday;
+            _cbDateLine = new CheckBox();
+            _cbDateLine.Text = "显示日期行"; _cbDateLine.Location = new Point(214, 26); _cbDateLine.AutoSize = true; _cbDateLine.Checked = Settings.ShowDateLine;
+            Label l1 = new Label();
+            l1.Text = "自定义时间格式（留空用预设，示例：HH:mm、HH:mm:ss、yyyy-MM-dd）";
+            l1.Location = new Point(16, 58); l1.AutoSize = true;
+            _tbFormat = new TextBox();
+            _tbFormat.Location = new Point(16, 80); _tbFormat.Size = new Size(416, 24); _tbFormat.Text = Settings.CustomTimeFormat;
+            _cbTz2 = new CheckBox();
+            _cbTz2.Text = "第二时区"; _cbTz2.Location = new Point(16, 114); _cbTz2.AutoSize = true; _cbTz2.Checked = Settings.ShowSecondClock;
+            _cboTz = new ComboBox();
+            _cboTz.Location = new Point(106, 110); _cboTz.Size = new Size(206, 24); _cboTz.DropDownStyle = ComboBoxStyle.DropDownList;
+            foreach (SettingsForm.TzItem z in TzOptions) _cboTz.Items.Add(z);
+            _cboTz.SelectedIndex = IndexOfTz(Settings.SecondTzId);
+            _tbTzLabel = new TextBox();
+            _tbTzLabel.Location = new Point(322, 110); _tbTzLabel.Size = new Size(110, 24); _tbTzLabel.Text = Settings.SecondTzLabel;
+            g1.Controls.AddRange(new Control[] { _cbSeconds, _cbWeekday, _cbDateLine, l1, _tbFormat, _cbTz2, _cboTz, _tbTzLabel });
+            Controls.Add(g1);
+
+            // ---- 日历外观 ----
+            GroupBox g2 = new GroupBox();
+            g2.Text = "日历外观";
+            g2.Location = new Point(12, 170);
+            g2.Size = new Size(450, 132);
+            _cbWeekNum = new CheckBox();
+            _cbWeekNum.Text = "显示周数列"; _cbWeekNum.Location = new Point(16, 26); _cbWeekNum.AutoSize = true; _cbWeekNum.Checked = Settings.ShowWeekNumbers;
+            _rbFollow = new RadioButton();
+            _rbFollow.Text = "深浅跟随系统"; _rbFollow.Location = new Point(130, 25); _rbFollow.AutoSize = true;
+            _rbLight = new RadioButton();
+            _rbLight.Text = "浅色"; _rbLight.Location = new Point(266, 25); _rbLight.AutoSize = true;
+            _rbDark = new RadioButton();
+            _rbDark.Text = "深色"; _rbDark.Location = new Point(336, 25); _rbDark.AutoSize = true;
+            if (Settings.ThemeMode == 2) _rbDark.Checked = true;
+            else if (Settings.ThemeMode == 1) _rbLight.Checked = true;
+            else _rbFollow.Checked = true;
+            Label l2 = new Label();
+            l2.Text = "强调色"; l2.Location = new Point(16, 66); l2.AutoSize = true;
+            string[] swatches = { "#4472C4", "#C94F4F", "#2E8B57", "#D97941", "#7A5FB5", "#0F8A8A" };
+            Button[] sw = new Button[swatches.Length];
+            for (int i = 0; i < swatches.Length; i++)
+            {
+                string c = swatches[i];
+                sw[i] = new Button();
+                sw[i].Size = new Size(28, 28);
+                sw[i].Location = new Point(78 + i * 36, 58);
+                sw[i].FlatStyle = FlatStyle.Flat;
+                sw[i].BackColor = ColorTranslator.FromHtml(c);
+                sw[i].Click += delegate { _accent = c; };
+                g2.Controls.Add(sw[i]);
+            }
+            Button btnCustom = new Button();
+            btnCustom.Text = "自定义…";
+            btnCustom.Location = new Point(300, 57);
+            btnCustom.Size = new Size(88, 28);
+            btnCustom.Click += delegate
+            {
+                ColorDialog cd = new ColorDialog();
+                cd.FullOpen = true;
+                try { cd.Color = ColorTranslator.FromHtml(_accent); } catch { }
+                if (cd.ShowDialog(this) == DialogResult.OK) _accent = "#" + cd.Color.R.ToString("X2") + cd.Color.G.ToString("X2") + cd.Color.B.ToString("X2");
+            };
+            Label l3 = new Label();
+            l3.Text = "主题与强调色在下次打开日历面板时生效";
+            l3.Location = new Point(16, 100); l3.AutoSize = true; l3.ForeColor = Color.FromArgb(130, 130, 130);
+            g2.Controls.AddRange(new Control[] { _cbWeekNum, _rbFollow, _rbLight, _rbDark, l2, btnCustom, l3 });
+            Controls.Add(g2);
+
+            // ---- 假日与日程数据 ----
+            GroupBox g3 = new GroupBox();
+            g3.Text = "假日与日程数据";
+            g3.Location = new Point(12, 310);
+            g3.Size = new Size(450, 132);
+            _cbAutoFetch = new CheckBox();
+            _cbAutoFetch.Text = "自动更新法定假日/调休数据（holiday-cn 数据源，每日一次）";
+            _cbAutoFetch.Location = new Point(16, 26); _cbAutoFetch.AutoSize = true; _cbAutoFetch.Checked = Settings.AutoFetchHolidays;
+            Button btnFetch = new Button();
+            btnFetch.Text = "立即更新";
+            btnFetch.Location = new Point(16, 56); btnFetch.Size = new Size(92, 27);
+            _lblFetch = new Label();
+            _lblFetch.Text = FetchStateText();
+            _lblFetch.Location = new Point(118, 61); _lblFetch.AutoSize = true;
+            btnFetch.Click += delegate
+            {
+                btnFetch.Enabled = false;
+                _lblFetch.Text = "正在更新…";
+                HolidayFeed.FetchAsync(delegate(bool fetchOk)
+                {
+                    try
+                    {
+                        BeginInvoke((MethodInvoker)delegate
+                        {
+                            btnFetch.Enabled = true;
+                            _lblFetch.Text = fetchOk ? "更新完成：" + Settings.HolidaysFetchedAt : "更新失败（离线时使用缓存/内置规则）";
+                        });
+                    }
+                    catch { }
+                });
+            };
+            Button btnHol = new Button();
+            btnHol.Text = "节假日配置…";
+            btnHol.Location = new Point(16, 92); btnHol.Size = new Size(110, 27);
+            btnHol.Click += delegate
+            {
+                CalendarData.EnsureOverrideFile();
+                try { Process.Start("notepad.exe", CalendarData.OverrideFilePath); }
+                catch (Exception ex) { MessageBox.Show("打开配置失败：" + ex.Message, "中国时间"); }
+            };
+            Button btnAgenda = new Button();
+            btnAgenda.Text = "日程文件…";
+            btnAgenda.Location = new Point(136, 92); btnAgenda.Size = new Size(110, 27);
+            btnAgenda.Click += delegate
+            {
+                AgendaStore.EnsureFile();
+                try { Process.Start("notepad.exe", AgendaStore.FilePath); }
+                catch (Exception ex) { MessageBox.Show("打开日程失败：" + ex.Message, "中国时间"); }
+            };
+            g3.Controls.AddRange(new Control[] { _cbAutoFetch, btnFetch, _lblFetch, btnHol, btnAgenda });
+            Controls.Add(g3);
+
+            // ---- 通用 ----
+            GroupBox g4 = new GroupBox();
+            g4.Text = "通用";
+            g4.Location = new Point(12, 450);
+            g4.Size = new Size(450, 58);
+            _cbAutoStart = new CheckBox();
+            _cbAutoStart.Text = "开机自启（登录时启动）";
+            _cbAutoStart.Location = new Point(16, 24); _cbAutoStart.AutoSize = true; _cbAutoStart.Checked = ClockForm.IsAutoStart();
+            g4.Controls.Add(_cbAutoStart);
+            Controls.Add(g4);
+
+            // ---- 保存/取消 ----
+            Button ok = new Button();
+            ok.Text = "保存";
+            ok.Size = new Size(88, 30);
+            ok.Location = new Point(286, 520);
+            ok.Click += delegate { SaveAndClose(); };
+            Button cancel = new Button();
+            cancel.Text = "取消";
+            cancel.Size = new Size(88, 30);
+            cancel.Location = new Point(382, 520);
+            cancel.Click += delegate { Close(); };
+            Controls.Add(ok);
+            Controls.Add(cancel);
+            AcceptButton = ok;
+            CancelButton = cancel;
+        }
+
+        private static int IndexOfTz(string id)
+        {
+            for (int i = 0; i < TzOptions.Length; i++)
+                if (TzOptions[i].Id == id) return i;
+            return 0;
+        }
+
+        private static string FetchStateText()
+        {
+            return Settings.HolidaysFetchedAt.Length > 0 ? "上次更新：" + Settings.HolidaysFetchedAt : "尚未更新（离线时使用缓存/内置规则）";
+        }
+
+        private void SaveAndClose()
+        {
+            Settings.ShowSeconds = _cbSeconds.Checked;
+            Settings.ShowWeekday = _cbWeekday.Checked;
+            Settings.ShowDateLine = _cbDateLine.Checked;
+            Settings.CustomTimeFormat = _tbFormat.Text.Trim();
+            Settings.ShowSecondClock = _cbTz2.Checked;
+            SettingsForm.TzItem tz = _cboTz.SelectedItem as SettingsForm.TzItem;
+            if (tz != null)
+            {
+                Settings.SecondTzId = tz.Id;
+                if (_tbTzLabel.Text.Trim().Length > 0) Settings.SecondTzLabel = _tbTzLabel.Text.Trim();
+                else Settings.SecondTzLabel = tz.Label;
+            }
+            Settings.ShowWeekNumbers = _cbWeekNum.Checked;
+            Settings.ThemeMode = _rbDark.Checked ? 2 : (_rbLight.Checked ? 1 : 0);
+            Settings.Accent = _accent;
+            Settings.AutoFetchHolidays = _cbAutoFetch.Checked;
+            Settings.Save();
+            ClockForm.SetAutoStart(_cbAutoStart.Checked);
+            if (_clock != null && !_clock.IsDisposed) _clock.RefreshSettings();
+            Close();
+        }
+    }
+
+    // ============================ 任务栏时钟 ============================
     internal sealed class ClockForm : Form
     {
         private const int HWND_TOPMOST = -1;
@@ -770,34 +2322,62 @@ namespace ChinaClock
         private Rectangle _trayRect;     // 任务栏区域
         private Color _bg = SystemColors.Control;
         private bool _lightTaskbar = true;
-        private string _timeText = "", _dateText = "", _lastStamp = "";
-        private Font _f1, _f2;
+        private string _timeText = "", _dateText = "", _tzText = "", _lastStamp = "";
+        private Font _f1, _f2, _f3;
+        private ToolTip _tip;            // A2：悬停显示 农历/节日/倒计时
+        private string _lastTipText = "";
+        private TimeZoneInfo _tz2;       // A3：第二时区
+        private string _tz2Id = "";
         private int _fontH = -1;
         private DateTime _lastToggle = DateTime.MinValue;
         private DateTime _panelClosedAt = DateTime.MinValue;
         private CalendarPanel _panel;
+        private SettingsForm _settings;                 // C2：设置窗（非模态，单例）
+        private DateTime _lastFetchDay = DateTime.MinValue; // B1：每日一次自动更新
+        private NotifyIcon _icon;                       // N1：托盘图标（提醒气泡 + 备用菜单入口）
+        private DateTime _reminderDay = DateTime.MinValue;
+        private List<string> _fired = new List<string>(); // 已提醒过的 "日期|内容"
         private WinEventDelegate _hookProc;  // 保持引用防 GC 回收，否则钩子会失效
         private IntPtr _hookFore = IntPtr.Zero, _hookReorder = IntPtr.Zero;
         private IntPtr _trayHwnd = IntPtr.Zero;
         private readonly bool _openPanel;
+        private readonly bool _openSettings;
+        private readonly bool _openAgendaDemo;
+        private readonly bool _openListDemo;
 
-        public ClockForm(bool openPanel)
+        public ClockForm(bool openPanel, bool openSettings, bool openAgendaDemo, bool openListDemo)
         {
             _openPanel = openPanel;
+            _openSettings = openSettings;
+            _openAgendaDemo = openAgendaDemo;
+            _openListDemo = openListDemo;
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.Manual;
             DoubleBuffered = true;
 
+            Settings.Load(); // 全局设置（settings.ini）
             BuildMenu();
+            _tip = new ToolTip { InitialDelay = 400, ReshowDelay = 1000, ShowAlways = true };
             UpdateTime();
+
+            // N1：托盘图标（提醒气泡、点击气泡打开面板、右键复用主菜单）
+            _icon = new NotifyIcon();
+            _icon.Icon = MakeAppIcon();
+            _icon.Text = "中国时间 · 日历";
+            _icon.Visible = true;
+            _icon.ContextMenuStrip = ContextMenuStrip;
+            _icon.BalloonTipClicked += delegate
+            {
+                if (_panel == null || _panel.IsDisposed || !_panel.Visible) TogglePanel();
+            };
 
             _uiTimer.Interval = 200;
             _uiTimer.Tick += delegate { UpdateTime(); };
             _fitTimer.Interval = 4000;
             _fitTimer.Tick += delegate { FitToNativeClock(Rectangle.Empty); };
             _bgTimer.Interval = 15000;
-            _bgTimer.Tick += delegate { SampleBackgroundAsync(); };
+            _bgTimer.Tick += delegate { SampleBackgroundAsync(); MaybeDailyFetch(); CheckReminders(); };
         }
 
         protected override bool ShowWithoutActivation { get { return true; } }
@@ -823,6 +2403,8 @@ namespace ChinaClock
             _fitTimer.Start();
             _bgTimer.Start();
             SampleBackgroundAsync();
+            HolidayFeed.LoadCache(); // 离线先用缓存
+            MaybeDailyFetch();
 
             System.Threading.ThreadPool.QueueUserWorkItem(delegate
             {
@@ -883,7 +2465,116 @@ namespace ChinaClock
         {
             base.OnShown(e);
             if (_openPanel) TogglePanel();
+            if (_openSettings) ShowSettings();
+            if (_openAgendaDemo)
+            {
+                TogglePanel(); // 日程编辑窗视觉测试入口：面板 + 当天编辑器
+                if (_panel != null)
+                    _panel.OpenAgenda(TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, ChinaTz).Date);
+            }
+            if (_openListDemo)
+            {
+                TogglePanel(); // 近期日程列表视觉测试入口
+                if (_panel != null) _panel.ToggleList();
+            }
+            CheckReminders(); // 启动即检查一次当天日程（带时间的到点后由 15s 定时器补发）
             SampleBackgroundAsync(); // 首次显示后立刻按"可见状态"重新采底色（不等 15s 定时器）
+        }
+
+        // N1：当天日程提醒。无时间的条目合并成一条气泡（启动/跨天首次检查时）；
+        // 行首带 HH:mm 的条目到点单独提醒。跨天重置，重启同日会重发（当作提醒）
+        private void CheckReminders()
+        {
+            try
+            {
+                DateTime now = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, ChinaTz);
+                DateTime today = now.Date;
+                if (today != _reminderDay) { _reminderDay = today; _fired.Clear(); }
+                List<AgendaItem> items = AgendaStore.On(today);
+                if (items.Count == 0) return;
+                string hhmm = now.ToString("HH:mm");
+                List<string> banner = new List<string>();
+                foreach (AgendaItem it in items)
+                {
+                    string key = today.ToString("yyyyMMdd") + "|" + it.Text;
+                    if (_fired.Contains(key)) continue;
+                    if (it.Time != null)
+                    {
+                        if (string.Compare(hhmm, it.Time) < 0) continue; // 还没到点
+                        _fired.Add(key);
+                        ShowReminder("日程提醒", it.Text.Length > 180 ? it.Text.Substring(0, 180) : it.Text);
+                    }
+                    else
+                    {
+                        _fired.Add(key);
+                        banner.Add(it.Text);
+                    }
+                }
+                if (banner.Count > 0)
+                {
+                    string text = banner.Count <= 4 ? string.Join("\n", banner.ToArray())
+                        : banner[0] + "\n" + banner[1] + "\n… 共 " + banner.Count + " 项";
+                    ShowReminder("今日日程 " + banner.Count + " 项", text.Length > 200 ? text.Substring(0, 200) : text);
+                }
+            }
+            catch { }
+        }
+
+        private void ShowReminder(string title, string text)
+        {
+            // 提醒历史（勿扰模式下横幅不弹，但通知中心/此日志可查）
+            try
+            {
+                File.AppendAllText(Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ChinaClock", "reminder-log.txt"),
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " [" + title + "] " + text.Replace("\n", " / ") + "\r\n");
+            }
+            catch { }
+            try
+            {
+                _icon.BalloonTipTitle = title;
+                _icon.BalloonTipIcon = ToolTipIcon.Info;
+                _icon.BalloonTipText = text;
+                _icon.ShowBalloonTip(6000);
+            }
+            catch { }
+        }
+
+        // N1：托盘图标——强调色圆点
+        private static Icon MakeAppIcon()
+        {
+            using (Bitmap b = new Bitmap(32, 32))
+            using (Graphics g = Graphics.FromImage(b))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                using (SolidBrush br = new SolidBrush(PanelPalette.Load().Accent))
+                    g.FillEllipse(br, 2, 2, 28, 28);
+                return Icon.FromHandle(b.GetHicon());
+            }
+        }
+
+        // B1：每个自然日自动拉一次假日数据（后台线程，失败静默）
+        private void MaybeDailyFetch()
+        {
+            if (!Settings.AutoFetchHolidays) return;
+            DateTime today = DateTime.Now.Date;
+            if (_lastFetchDay == today) return;
+            _lastFetchDay = today;
+            HolidayFeed.FetchAsync(null);
+        }
+
+        // C2：设置窗（非模态单例——模态会卡住 UI 线程上的秒级时钟刷新）
+        private void ShowSettings()
+        {
+            if (_settings == null || _settings.IsDisposed)
+            {
+                _settings = new SettingsForm(this);
+                _settings.Show();
+            }
+            else
+            {
+                _settings.Activate();
+            }
         }
 
         // ---- 定位：找到系统时钟并覆盖 ----
@@ -980,8 +2671,10 @@ namespace ChinaClock
             _fontH = h;
             if (_f1 != null) _f1.Dispose();
             if (_f2 != null) _f2.Dispose();
+            if (_f3 != null) _f3.Dispose();
             _f1 = new Font("Segoe UI", Math.Max(10, (int)Math.Round(h * 0.30f)), FontStyle.Regular, GraphicsUnit.Pixel);
             _f2 = new Font("Segoe UI", Math.Max(8, (int)Math.Round(h * 0.22f)), FontStyle.Regular, GraphicsUnit.Pixel);
+            _f3 = new Font("Segoe UI", Math.Max(7, (int)Math.Round(h * 0.17f)), FontStyle.Regular, GraphicsUnit.Pixel);
         }
 
         // 任务栏底色采样：在后台线程用 CopyFromScreen 抓取任务栏像素条，取"均匀条"
@@ -1130,9 +2823,89 @@ namespace ChinaClock
             string stamp = now.ToString("yyyyMMddHHmmss");
             if (stamp == _lastStamp) return;
             _lastStamp = stamp;
-            _timeText = now.ToString("HH:mm:ss") + "  " + Weekdays[(int)now.DayOfWeek];
-            _dateText = now.ToString(_datePattern);
+
+            // A1：时间行格式——自定义格式串 > 秒/星期预设
+            string tf = Settings.CustomTimeFormat;
+            if (tf == null || tf.Length == 0) tf = Settings.ShowSeconds ? "HH:mm:ss" : "HH:mm";
+            string t;
+            try { t = now.ToString(tf); }
+            catch { t = now.ToString("HH:mm:ss"); }
+            if (Settings.ShowWeekday) t += "  " + Weekdays[(int)now.DayOfWeek];
+            _timeText = t;
+            _dateText = Settings.ShowDateLine ? now.ToString(_datePattern) : "";
+            _tzText = Settings.ShowSecondClock ? SecondClockText() : "";
+            UpdateTip(now);
             Invalidate();
+        }
+
+        // A3：第二时区行 "标签 HH:mm"
+        private string SecondClockText()
+        {
+            try
+            {
+                if (_tz2 == null || _tz2Id != Settings.SecondTzId)
+                {
+                    _tz2 = TimeZoneInfo.FindSystemTimeZoneById(Settings.SecondTzId);
+                    _tz2Id = Settings.SecondTzId;
+                }
+                string label = Settings.SecondTzLabel.Length > 0 ? Settings.SecondTzLabel : Settings.SecondTzId;
+                return label + " " + TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, _tz2).ToString("HH:mm");
+            }
+            catch { return Settings.SecondTzLabel + " --:--"; }
+        }
+
+        // A2：悬停时钟气泡 = 完整日期 + 农历干支 + 今日节日/节气 + 假期倒计时；
+        // 内容只按分钟变化刷新，避免每秒重置气泡
+        private void UpdateTip(DateTime now)
+        {
+            string text = BuildTipText(now);
+            if (text == _lastTipText) return;
+            _lastTipText = text;
+            _tip.SetToolTip(this, text);
+        }
+
+        private string BuildTipText(DateTime now)
+        {
+            CalendarData.DayInfo di = CalendarData.Get(now);
+            List<string> lines = new List<string>();
+            lines.Add(now.ToString("yyyy年M月d日 ") + Weekdays[(int)now.DayOfWeek]);
+            string info = "农历 " + di.LunarFullText + " · " + di.GanZhiYear + di.Animal + "年 · "
+                + di.GanZhiMonth + "月 · " + di.GanZhiDay + "日";
+            if (di.Badge != null) info += "　" + di.Badge;
+            lines.Add(info);
+            if (di.Festival != null) lines.Add("今天 " + di.Festival);
+            else if (di.TermName != null) lines.Add("今天 " + di.TermName);
+            DateTime hd; string hn;
+            if (NextHoliday(now.Date, out hd, out hn))
+            {
+                int cd = (int)(hd - now.Date).TotalDays;
+                lines.Add(cd == 0 ? "今天 " + hn : "距 " + hn + " 还有 " + cd + " 天");
+            }
+            return string.Join("\n", lines.ToArray());
+        }
+
+        // 最近一个法定/传统节日（含今天）
+        private static bool NextHoliday(DateTime today, out DateTime date, out string name)
+        {
+            DateTime best = DateTime.MaxValue; string bestName = null;
+            for (int y = today.Year; y <= today.Year + 1; y++)
+            {
+                AddCand(ref best, ref bestName, new DateTime(y, 1, 1), "元旦", today);
+                AddCand(ref best, ref bestName, CalendarData.TermDate(y, "清明"), "清明", today);
+                AddCand(ref best, ref bestName, new DateTime(y, 5, 1), "劳动节", today);
+                AddCand(ref best, ref bestName, new DateTime(y, 10, 1), "国庆节", today);
+                try { AddCand(ref best, ref bestName, CalendarData.LunarDate(y, 1, 1), "春节", today); } catch { }
+                try { AddCand(ref best, ref bestName, CalendarData.LunarDate(y, 5, 5), "端午", today); } catch { }
+                try { AddCand(ref best, ref bestName, CalendarData.LunarDate(y, 8, 15), "中秋", today); } catch { }
+            }
+            if (best == DateTime.MaxValue) { date = today; name = null; return false; }
+            date = best; name = bestName; return true;
+        }
+
+        private static void AddCand(ref DateTime best, ref string bestName, DateTime d, string n, DateTime today)
+        {
+            if (d.Date < today || d >= best) return;
+            best = d; bestName = n;
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -1141,17 +2914,42 @@ namespace ChinaClock
             Color c1 = _lightTaskbar ? Color.FromArgb(26, 26, 26) : Color.FromArgb(242, 242, 242);
             Color c2 = _lightTaskbar ? Color.FromArgb(96, 96, 96) : Color.FromArgb(197, 197, 197);
 
-            Size s1 = TextRenderer.MeasureText(_timeText, _f1);
-            Size s2 = TextRenderer.MeasureText(_dateText, _f2);
-            int gap = 1;
-            int y = Math.Max(1, (ClientSize.Height - (s1.Height + gap + s2.Height)) / 2);
+            // 行集合按设置动态组装（A1/A3）：时间行 + 日期行 + 第二时区行，整体垂直居中
+            List<Line> ls = new List<Line>();
+            if (_timeText.Length > 0) ls.Add(new Line(_timeText, _f1, c1));
+            if (_dateText.Length > 0) ls.Add(new Line(_dateText, _f2, c2));
+            if (_tzText.Length > 0) ls.Add(new Line(_tzText, _f3, c2));
 
-            var flags = TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.SingleLine;
+            int total = 0;
+            foreach (Line ln in ls) total += TextRenderer.MeasureText(ln.Text, ln.Font).Height + 1;
+            if (ls.Count > 0) total -= 1;
             int padX = 7;
-            TextRenderer.DrawText(g, _timeText, _f1, new Rectangle(padX, y, ClientSize.Width - padX - 2, s1.Height), c1, flags);
-            TextRenderer.DrawText(g, _dateText, _f2, new Rectangle(padX, y + s1.Height + gap, ClientSize.Width - padX - 2, s2.Height), c2, flags);
+            int y = Math.Max(1, (ClientSize.Height - total) / 2);
+            foreach (Line ln in ls)
+            {
+                Size sz = TextRenderer.MeasureText(ln.Text, ln.Font);
+                TextRenderer.DrawText(g, ln.Text, ln.Font,
+                    new Rectangle(padX, y, ClientSize.Width - padX - 2, sz.Height), ln.Color,
+                    TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.SingleLine);
+                y += sz.Height + 1;
+            }
 
             base.OnPaint(e);
+        }
+
+        private struct Line
+        {
+            public string Text; public Font Font; public Color Color;
+            public Line(string t, Font f, Color c) { Text = t; Font = f; Color = c; }
+        }
+
+        // 设置窗保存后调用：重置缓存并立即刷新
+        public void RefreshSettings()
+        {
+            _tz2 = null; _tz2Id = "";
+            _lastStamp = ""; // 强制 UpdateTime 重算文本
+            UpdateTime();
+            Invalidate();
         }
 
         // ---- 交互 ----
@@ -1191,6 +2989,9 @@ namespace ChinaClock
 
         private void BuildMenu()
         {
+            var miSettings = new ToolStripMenuItem("设置…");
+            miSettings.Click += delegate { ShowSettings(); };
+
             var miPanel = new ToolStripMenuItem("打开日历面板");
             miPanel.Click += delegate { TogglePanel(); };
 
@@ -1216,6 +3017,8 @@ namespace ChinaClock
             miExit.Click += delegate { Close(); };
 
             var menu = new ContextMenuStrip();
+            menu.Items.Add(miSettings);
+            menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(miPanel);
             menu.Items.Add(miHoliday);
             menu.Items.Add(_miAutoStart);
@@ -1230,13 +3033,13 @@ namespace ChinaClock
         private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
         private const string RunName = "ChinaClock";
 
-        private static bool IsAutoStart()
+        internal static bool IsAutoStart()
         {
             using (var k = Registry.CurrentUser.OpenSubKey(RunKey))
                 return k != null && k.GetValue(RunName) != null;
         }
 
-        private static void SetAutoStart(bool on)
+        internal static void SetAutoStart(bool on)
         {
             try
             {
@@ -1263,8 +3066,11 @@ namespace ChinaClock
             if (_hookReorder != IntPtr.Zero) UnhookWinEvent(_hookReorder);
             _hookProc = null;
             if (_panel != null && !_panel.IsDisposed) _panel.Close();
+            if (_tip != null) _tip.Dispose();
+            if (_icon != null) { _icon.Visible = false; _icon.Dispose(); }
             if (_f1 != null) _f1.Dispose();
             if (_f2 != null) _f2.Dispose();
+            if (_f3 != null) _f3.Dispose();
             base.OnFormClosed(e);
         }
     }
