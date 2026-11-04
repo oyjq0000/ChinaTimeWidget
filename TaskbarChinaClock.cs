@@ -56,6 +56,7 @@ namespace ChinaClock
             bool openSettings = Array.IndexOf(a, "--settings") >= 0;
             bool agendaDemo = Array.IndexOf(a, "--agenda-demo") >= 0;
             bool listDemo = Array.IndexOf(a, "--list-demo") >= 0;
+            bool pickerDemo = Array.IndexOf(a, "--picker-demo") >= 0;
 
             bool createdNew;
             using (new System.Threading.Mutex(true, "ChinaClock_SingleInstance", out createdNew))
@@ -64,7 +65,7 @@ namespace ChinaClock
                 try { SetProcessDPIAware(); } catch { }
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                Application.Run(new ClockForm(openPanel, openSettings, agendaDemo, listDemo));
+                Application.Run(new ClockForm(openPanel, openSettings, agendaDemo, listDemo, pickerDemo));
             }
         }
     }
@@ -1432,6 +1433,15 @@ namespace ChinaClock
             Invalidate();
         }
 
+        // 年月选择器视觉/测试入口（--picker-demo）：直接进入选月视图
+        public void OpenPickerDemo()
+        {
+            _pickMode = 1;
+            _pickYear = _viewMonth.Year;
+            _hot = -1;
+            Invalidate();
+        }
+
         // 点击选择器格子以外（头部/底部/缝隙）视为放弃选择，收起回月历
         private void PickClick(Point p)
         {
@@ -2344,13 +2354,15 @@ namespace ChinaClock
         private readonly bool _openSettings;
         private readonly bool _openAgendaDemo;
         private readonly bool _openListDemo;
+        private readonly bool _openPickerDemo;
 
-        public ClockForm(bool openPanel, bool openSettings, bool openAgendaDemo, bool openListDemo)
+        public ClockForm(bool openPanel, bool openSettings, bool openAgendaDemo, bool openListDemo, bool openPickerDemo)
         {
             _openPanel = openPanel;
             _openSettings = openSettings;
             _openAgendaDemo = openAgendaDemo;
             _openListDemo = openListDemo;
+            _openPickerDemo = openPickerDemo;
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.Manual;
@@ -2476,6 +2488,11 @@ namespace ChinaClock
             {
                 TogglePanel(); // 近期日程列表视觉测试入口
                 if (_panel != null) _panel.ToggleList();
+            }
+            if (_openPickerDemo)
+            {
+                TogglePanel(); // 年月选择器视觉测试入口
+                if (_panel != null) _panel.OpenPickerDemo();
             }
             CheckReminders(); // 启动即检查一次当天日程（带时间的到点后由 15s 定时器补发）
             SampleBackgroundAsync(); // 首次显示后立刻按"可见状态"重新采底色（不等 15s 定时器）

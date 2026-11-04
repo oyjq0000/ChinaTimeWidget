@@ -1,4 +1,7 @@
 shot.png
 r*.png
 selftest-result.txt
+fetch-result.txt
 TaskbarChinaClock.exe
+.vs/
+*.user
