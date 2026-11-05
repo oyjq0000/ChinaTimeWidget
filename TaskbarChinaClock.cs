@@ -345,7 +345,7 @@ namespace ChinaClock
     internal sealed class PanelPalette
     {
         public bool Dark;
-        public Color Back, Border, Text, Sub, Red, Blue, Accent, Dim, DimSub, SubLunar,
+        public Color Back, Border, Text, Sub, Red, Blue, Good, Accent, Dim, DimSub, SubLunar,
             SelBg, Hover, BtnBg, BtnHot, RestBg, RestFg, WorkBg, WorkFg, Dot;
 
         public static PanelPalette Load()
@@ -366,6 +366,7 @@ namespace ChinaClock
                 p.Sub = Color.FromArgb(107, 107, 107);
                 p.Red = Color.FromArgb(224, 72, 62);
                 p.Blue = Color.FromArgb(58, 123, 213);
+                p.Good = Color.FromArgb(34, 139, 74);
                 p.Dim = Color.FromArgb(205, 205, 205);
                 p.DimSub = Color.FromArgb(222, 222, 222);
                 p.SubLunar = Color.FromArgb(166, 166, 166);
@@ -386,6 +387,7 @@ namespace ChinaClock
                 p.Sub = Color.FromArgb(156, 156, 156);
                 p.Red = Color.FromArgb(240, 98, 88);
                 p.Blue = Color.FromArgb(110, 160, 225);
+                p.Good = Color.FromArgb(112, 190, 128);
                 p.Dim = Color.FromArgb(84, 84, 84);
                 p.DimSub = Color.FromArgb(74, 74, 74);
                 p.SubLunar = Color.FromArgb(150, 150, 150);
@@ -1404,6 +1406,8 @@ namespace ChinaClock
         private int _pad, _headerH, _titleH, _weekH, _cellH, _cellW, _footerH;
         private int _offDate, _offInfo; // 头部日期行/农历行距头部顶端的物理偏移（按字体行高算得）
         private Font _fTime, _fDate, _fInfo, _fWeek, _fDay, _fSmall, _fFoot;
+        private Font _fIcon;                     // Segoe 图标字体（添加/编辑日程小图标），可能为 null
+        private Font _fSection;                  // 小节标题粗体（日程/黄历 + 宜/忌标签）
         private Rectangle _gridRect, _btnTitlePrev, _btnTitleNext, _titleRect, _btnToday, _btnAgenda;
         private int _pickMode;      // 中部层级：0=月历 1=选月 2=选年（十年区）3=近期日程列表
         private int _pickYear;      // 选月/选年视图浏览的年份
@@ -1432,7 +1436,7 @@ namespace ChinaClock
 
         // 配色由 PanelPalette 按主题/强调色生成（C1/C3）
         private PanelPalette P;
-        private Color _cText, _cSub, _cRed, _cBlue, _cAccent, _cDim,
+        private Color _cText, _cSub, _cRed, _cBlue, _cGood, _cAccent, _cDim,
             _cDimSub, _cSubLunar, _cSelBg, _cHover, _cBtnBg, _cBtnHot,
             _cBorder, _cRestBg, _cRestFg, _cWorkBg, _cWorkFg, _cDot;
 
@@ -1451,7 +1455,7 @@ namespace ChinaClock
             Settings.Load();
             P = PanelPalette.Load();
             BackColor = P.Back;
-            _cText = P.Text; _cSub = P.Sub; _cRed = P.Red; _cBlue = P.Blue; _cAccent = P.Accent; _cDim = P.Dim;
+            _cText = P.Text; _cSub = P.Sub; _cRed = P.Red; _cBlue = P.Blue; _cGood = P.Good; _cAccent = P.Accent; _cDim = P.Dim;
             _cDimSub = P.DimSub; _cSubLunar = P.SubLunar; _cSelBg = P.SelBg; _cHover = P.Hover;
             _cBtnBg = P.BtnBg; _cBtnHot = P.BtnHot; _cBorder = P.Border; _cDot = P.Dot;
             _cRestBg = P.RestBg; _cRestFg = P.RestFg; _cWorkBg = P.WorkBg; _cWorkFg = P.WorkFg;
@@ -1466,6 +1470,8 @@ namespace ChinaClock
             _fDay = new Font("Segoe UI", 10.5F, FontStyle.Bold);
             _fSmall = new Font("Microsoft YaHei UI", 8.5F);
             _fFoot = new Font("Microsoft YaHei UI", 9.5F);
+            _fIcon = MakeIconFont(10F);
+            _fSection = new Font("Microsoft YaHei UI", 9F, FontStyle.Bold);
             int hTime = TextRenderer.MeasureText("00:00:00", _fTime).Height;
             int hDate = TextRenderer.MeasureText("2026年11月4日 星期三", _fDate).Height;
             int hInfo = TextRenderer.MeasureText("农历 九月廿六", _fInfo).Height;
@@ -2096,15 +2102,17 @@ namespace ChinaClock
             DrawGlyphButton(g, _btnCardNext, "›", _cardHot == 2);
             DrawGlyphButton(g, _btnCardClose, "×", _cardHot == 3);
 
-            // 大字日期（日 + 月 + 星期）
+            // 大字日期（日 + 月 + 星期）；查看今天时大数字用强调色，与其他日期区分
+            // 注：雅黑 10.5pt 行高≈18.5px，旧矩形高 18/16px 会把 CJK 最底一笔裁掉（"三"变"二"），已加高矩形
             y += Scale(4);
+            bool cardToday = d.Date == Now().Date;
             TextRenderer.DrawText(g, d.Day.ToString(), _fTime, new Rectangle(rx, y, Scale(52), Scale(38)),
-                _cText, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+                cardToday ? _cAccent : _cText, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
             TextRenderer.DrawText(g, d.ToString("M月"), _fDate,
-                new Rectangle(rx + Scale(58), y + Scale(5), rw - Scale(58), Scale(18)),
+                new Rectangle(rx + Scale(58), y + Scale(3), rw - Scale(58), Scale(19)),
                 _cText, TextFormatFlags.Left | TextFormatFlags.Top);
             TextRenderer.DrawText(g, WeekFull[(int)d.DayOfWeek], _fDate,
-                new Rectangle(rx + Scale(58), y + Scale(23), rw - Scale(58), Scale(16)),
+                new Rectangle(rx + Scale(58), y + Scale(23), rw - Scale(58), Scale(21)),
                 _cSub, TextFormatFlags.Left | TextFormatFlags.Top);
             y += Scale(46);
 
@@ -2119,7 +2127,8 @@ namespace ChinaClock
             {
                 bool isFest = di.Festival != null;
                 TextRenderer.DrawText(g, isFest ? di.Festival : di.TermName, _fInfo,
-                    new Rectangle(rx, y, rw, Scale(16)), isFest ? _cRed : _cBlue);
+                    new Rectangle(rx, y, rw, Scale(16)), isFest ? _cRed : _cBlue,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
                 y += Scale(21);
             }
 
@@ -2129,29 +2138,35 @@ namespace ChinaClock
             {
                 bool work = di.Badge == "班";
                 TextRenderer.DrawText(g, reason + (work ? "（补班）" : "（休）"), _fInfo,
-                    new Rectangle(rx, y, rw, Scale(16)), work ? _cWorkFg : _cRestFg);
+                    new Rectangle(rx, y, rw, Scale(16)), work ? _cWorkFg : _cRestFg,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
                 y += Scale(21);
             }
 
-            // 假期区间 / 倒计时
+            // 假期区间 / 倒计时：胶囊徽章（强调色浅底），头部信息区与正文区的视觉分界
             string hol = HolidayLine(d);
             if (hol != null)
             {
-                TextRenderer.DrawText(g, hol, _fInfo, new Rectangle(rx, y, rw, Scale(16)), _cAccent);
-                y += Scale(21);
+                Size hz = TextRenderer.MeasureText(g, hol, _fInfo);
+                Rectangle pill = new Rectangle(rx, y + Scale(1), Math.Min(rw, hz.Width + Scale(16)), Scale(19));
+                using (SolidBrush b = new SolidBrush(_cSelBg))
+                    g.FillPath(b, RoundedPath(pill, pill.Height / 2 - 1));
+                TextRenderer.DrawText(g, hol, _fInfo, pill, _cAccent,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                y += Scale(26);
             }
 
             DrawSep(g, rx, y, rw);
             y += Scale(11);
 
-            // 当天日程（最多 4 行，超出折叠）
-            TextRenderer.DrawText(g, "日程", _fSmall, new Rectangle(rx, y, rw, Scale(15)), _cAccent);
-            y += Scale(21);
+            // 当天日程（最多 6 行，超出折叠）
+            y += DrawSectionTitle(g, "日程", y, rx, rw);
             List<AgendaItem> items = AgendaStore.On(d);
             if (items.Count == 0)
             {
                 TextRenderer.DrawText(g, "暂无日程，点下方按钮添加", _fSmall,
-                    new Rectangle(rx, y, rw, Scale(15)), _cSubLunar);
+                    new Rectangle(rx, y, rw, Scale(15)), _cSubLunar,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
                 y += Scale(21);
             }
             else
@@ -2159,10 +2174,11 @@ namespace ChinaClock
                 int shown = 0;
                 foreach (AgendaItem it in items)
                 {
-                    if (shown >= 4)
+                    if (shown >= 6)
                     {
                         TextRenderer.DrawText(g, "… 共 " + items.Count + " 项", _fSmall,
-                            new Rectangle(rx, y, rw, Scale(15)), _cSub);
+                            new Rectangle(rx, y, rw, Scale(15)), _cSub,
+                            TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
                         y += Scale(20);
                         break;
                     }
@@ -2173,26 +2189,39 @@ namespace ChinaClock
                     shown++;
                 }
             }
-            _btnCardEdit = new Rectangle(rx, y, Scale(96), Scale(26));
-            DrawMiniButton(g, _btnCardEdit, "编辑日程…", _cardHot == 4);
-            y += Scale(36);
+            // 添加/编辑日程：轻量"图标+文字"链接式按钮（悬停补圆角底），替代笨重的灰底块
+            bool emptyAgenda = items.Count == 0;
+            string btnText = emptyAgenda ? "添加日程" : "编辑日程";
+            string btnGlyph = emptyAgenda ? "\uE710" : "\uE70F";   // MDL2：加号 / 铅笔
+            Size btnTsz = TextRenderer.MeasureText(g, btnText, _fInfo);
+            int btnH = Scale(24), glyphW = Scale(16), btnPad = Scale(7);
+            _btnCardEdit = new Rectangle(rx, y, btnPad + glyphW + Scale(3) + btnTsz.Width + btnPad, btnH);
+            if (_cardHot == 4) FillHover(g, _btnCardEdit);
+            if (_fIcon != null)
+                TextRenderer.DrawText(g, btnGlyph, _fIcon,
+                    new Rectangle(rx + btnPad, y, glyphW, btnH), _cAccent,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            else
+                TextRenderer.DrawText(g, "+", _fWeek,
+                    new Rectangle(rx + btnPad, y, glyphW, btnH), _cAccent,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+            TextRenderer.DrawText(g, btnText, _fInfo,
+                new Rectangle(rx + btnPad + glyphW + Scale(3), y, btnTsz.Width, btnH), _cAccent,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+            y += Scale(34);
             DrawSep(g, rx, y, rw);
             y += Scale(11);
 
             // 黄历
-            TextRenderer.DrawText(g, "黄历", _fSmall, new Rectangle(rx, y, rw, Scale(15)), _cAccent);
-            y += Scale(21);
+            y += DrawSectionTitle(g, "黄历", y, rx, rw);
             string officer = Almanac.Officer(di.GanZhiDay, di.GanZhiMonth);
-            TextRenderer.DrawText(g, "宜  " + Almanac.Yi(officer), _fInfo,
-                new Rectangle(rx, y, rw, Scale(16)), _cText,
-                TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
-            y += Scale(21);
-            TextRenderer.DrawText(g, "忌  " + Almanac.Ji(officer), _fInfo,
-                new Rectangle(rx, y, rw, Scale(16)), _cRed,
-                TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
-            y += Scale(21);
+            y += DrawAlmanacRow(g, "宜", PanelPalette.Blend(P.Back, P.Good, 0.12f), _cGood,
+                Almanac.Yi(officer), y, rx, rw);
+            y += DrawAlmanacRow(g, "忌", PanelPalette.Blend(P.Back, P.Red, 0.09f), _cRed,
+                Almanac.Ji(officer), y, rx, rw);
             TextRenderer.DrawText(g, Almanac.ChongSha(di.GanZhiDay), _fInfo,
-                new Rectangle(rx, y, rw, Scale(16)), _cSub);
+                new Rectangle(rx, y, rw, Scale(16)), _cSub,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
             y += Scale(21);
             bool yellow;
             string zs = Almanac.ZhiShen(di.GanZhiDay, di.GanZhiMonth, out yellow);
@@ -2203,12 +2232,103 @@ namespace ChinaClock
             DrawSep(g, rx, y, rw);
             y += Scale(11);
 
-            // 年度进度（优效日历同款信息）
+            // 底部进度区：内嵌浅色圆角底，把年度/今日两条进度聚合成独立信息区
+            Rectangle foot = new Rectangle(rx - Scale(7), y - Scale(6), rw + Scale(14), cardToday ? Scale(78) : Scale(40));
+            using (SolidBrush b = new SolidBrush(PanelPalette.Blend(P.Back, P.Text, 0.05f)))
+                g.FillPath(b, RoundedPath(foot, Scale(8)));
+            y += Scale(5);
+
+            // 年度进度（左：周/天，右：百分比，下：细进度条——优效日历同款信息，避免长文案被省略号截断）
             int daysInYear = DateTime.IsLeapYear(d.Year) ? 366 : 365;
             int pct = (int)Math.Round(d.DayOfYear * 100.0 / daysInYear);
-            TextRenderer.DrawText(g, "第" + CalendarData.IsoWeek(d) + "周 · 全年第" + d.DayOfYear + "天 · 年进度 " + pct + "%",
-                _fSmall, new Rectangle(rx, y, rw, Scale(15)), _cSubLunar,
-                TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(g, "第" + CalendarData.IsoWeek(d) + "周 · 第" + d.DayOfYear + "天", _fSmall,
+                new Rectangle(rx, y, rw - Scale(74), Scale(15)), _cSubLunar,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(g, "年进度 " + pct + "%", _fSmall,
+                new Rectangle(rx + rw - Scale(74), y, Scale(74), Scale(15)), _cAccent,
+                TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
+            y += Scale(19);
+            Rectangle track = new Rectangle(rx, y, rw, Scale(4));
+            using (SolidBrush tb = new SolidBrush(_cBorder))
+                g.FillPath(tb, RoundedPath(track, Scale(2)));
+            int fillW = Math.Max(Scale(4), (int)Math.Round(rw * (double)pct / 100.0));
+            Rectangle fillR = new Rectangle(rx, y, fillW, Scale(4));
+            using (SolidBrush fb = new SolidBrush(_cAccent))
+                g.FillPath(fb, RoundedPath(fillR, Scale(2)));
+
+            // 今日时间进度（仅查看今天时显示）：已过/剩余 HH:mm + 细进度条（蓝色区分年度条）
+            if (d.Date == Now().Date)
+            {
+                y += Scale(14);
+                TimeSpan gone = Now() - d.Date;
+                double frac = Math.Max(0.0, Math.Min(1.0, gone.TotalDays));
+                TimeSpan left = TimeSpan.FromDays(1) - gone;
+                if (left < TimeSpan.Zero) left = TimeSpan.Zero;
+                TextRenderer.DrawText(g, "今日已过 " + gone.ToString(@"hh\:mm"), _fSmall,
+                    new Rectangle(rx, y, rw - Scale(74), Scale(15)), _cSubLunar,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                TextRenderer.DrawText(g, "剩余 " + left.ToString(@"hh\:mm"), _fSmall,
+                    new Rectangle(rx + rw - Scale(74), y, Scale(74), Scale(15)), _cBlue,
+                    TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
+                y += Scale(19);
+                Rectangle dtrack = new Rectangle(rx, y, rw, Scale(4));
+                using (SolidBrush tb = new SolidBrush(_cBorder))
+                    g.FillPath(tb, RoundedPath(dtrack, Scale(2)));
+                int dfillW = Math.Max(Scale(4), (int)Math.Round(rw * frac));
+                Rectangle dfillR = new Rectangle(rx, y, dfillW, Scale(4));
+                using (SolidBrush fb = new SolidBrush(_cBlue))
+                    g.FillPath(fb, RoundedPath(dfillR, Scale(2)));
+            }
+        }
+
+        // 卡片小图标字体：优先 Win11 的 Segoe Fluent Icons，回退 Win10 的 Segoe MDL2 Assets；都没有返回 null（画"+"代替）
+        private static Font MakeIconFont(float pt)
+        {
+            foreach (string name in new[] { "Segoe Fluent Icons", "Segoe MDL2 Assets" })
+            {
+                try { return new Font(new FontFamily(name), pt); }
+                catch { }
+            }
+            return null;
+        }
+
+        // 黄历宜/忌行：彩色小标签（chip）+ 中性色条目；条目放不下自动折两行带省略号，返回实际占用高度
+        private int DrawAlmanacRow(Graphics g, string label, Color chipBg, Color chipFg, string items, int y, int rx, int rw)
+        {
+            int chipW = Scale(18), chipH = Scale(15), gap = Scale(7);
+            int itemsX = rx + chipW + gap;
+            int itemsW = rw - chipW - gap;
+            bool wrap = TextRenderer.MeasureText(g, items, _fInfo).Width > itemsW;
+            Rectangle chip = new Rectangle(rx, y + Scale(1), chipW, chipH);
+            using (SolidBrush b = new SolidBrush(chipBg))
+                g.FillPath(b, RoundedPath(chip, Scale(4)));
+            TextRenderer.DrawText(g, label, _fSection, chip, chipFg,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            if (!wrap)
+            {
+                TextRenderer.DrawText(g, items, _fInfo, new Rectangle(itemsX, y, itemsW, Scale(17)), _cText,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                return Scale(21);
+            }
+            TextRenderer.DrawText(g, items, _fInfo, new Rectangle(itemsX, y, itemsW, Scale(36)), _cText,
+                TextFormatFlags.Left | TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis);
+            return Scale(38);
+        }
+
+        // 小节标题：强调色竖条 + 粗体标题 + 右侧延伸细线（信息区视觉锚点），返回行高
+        private int DrawSectionTitle(Graphics g, string text, int y, int rx, int rw)
+        {
+            Rectangle tick = new Rectangle(rx, y + Scale(3), Scale(3), Scale(11));
+            using (SolidBrush b = new SolidBrush(_cAccent))
+                g.FillPath(b, RoundedPath(tick, Scale(1)));
+            Size ts = TextRenderer.MeasureText(g, text, _fSection);
+            TextRenderer.DrawText(g, text, _fSection, new Rectangle(rx + Scale(9), y, ts.Width + Scale(4), Scale(17)), _cText,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+            int lineX = rx + Scale(9) + ts.Width + Scale(9);
+            if (lineX < rx + rw - Scale(2))
+                using (Pen p = new Pen(_cBorder))
+                    g.DrawLine(p, lineX, y + Scale(8), rx + rw, y + Scale(8));
+            return Scale(22);
         }
 
         private void DrawSep(Graphics g, int x, int y, int w)
@@ -2406,7 +2526,7 @@ namespace ChinaClock
             _timer.Dispose();
             _tipPanel.Dispose();
             if (_editor != null && !_editor.IsDisposed) _editor.Dispose();
-            foreach (Font f in new[] { _fTime, _fDate, _fInfo, _fWeek, _fDay, _fSmall, _fFoot })
+            foreach (Font f in new[] { _fTime, _fDate, _fInfo, _fWeek, _fDay, _fSmall, _fFoot, _fIcon, _fSection })
                 if (f != null) f.Dispose();
             base.OnFormClosed(e);
         }
