@@ -1,7 +1,8 @@
 // TaskbarChinaClock — 任务栏右下角中国时间时钟 + 点击弹出中国日历面板
 // 原理：Windows 11 不允许修改任务栏时钟的渲染内容，所以用一个外观一致、
 //       置顶且不抢焦点的小窗口精确覆盖在系统时钟上方，背景色取自任务栏
-//       本身，视觉上就像系统时钟被换成了中国时间（北京时间 UTC+8）。
+//       本身，视觉上就像系统时钟被换成了中国时间（默认北京时间 UTC+8，
+//       主时区可在设置中指定，时钟/日历/提醒全部跟随，见 MainClock F3）。
 //       不修改系统时区、不改任何系统设置；本程序退出即恢复原样。
 // 交互：左键单击时钟 = 打开/关闭日历面板（月历：农历、节气、节日、
 //       干支纪年月日、法定假日"休"角标）；右键 = 菜单。
@@ -276,11 +277,12 @@ namespace ChinaClock
         public static bool ShowWeekday = true;
         public static bool ShowDateLine = true;
         public static string CustomTimeFormat = "";  // 非空时优先生效（DateTime 格式串）
+        public static string MainTzId = "China Standard Time"; // 主时区（F3）：时钟/日历/提醒跟随；特殊值 "Local"=跟随本机
         public static bool ShowSecondClock = false;  // 第二时区双时钟（A3）
         public static string SecondTzId = "UTC";     // Windows 时区 Id
         public static string SecondTzLabel = "UTC";
         public static bool ShowWeekNumbers = false;  // 日历左侧周数列（B2）
-        public static bool ShowLocalClock = true;    // 本机时间行（F2）：电脑时区≠北京时间时显示
+        public static bool ShowLocalClock = true;    // 本机时间行（F2）：本机时区≠主时区时显示（一致自动隐藏）
         public static int ThemeMode = 0;             // 0=跟随系统 1=浅色 2=深色（C1）
         public static string Accent = "#4472C4";     // 强调色（C3）
         public static bool AutoFetchHolidays = true; // B1：每日自动更新假日数据
@@ -307,6 +309,7 @@ namespace ChinaClock
                         case "ShowWeekday": ShowWeekday = GetBool(v, ShowWeekday); break;
                         case "ShowDateLine": ShowDateLine = GetBool(v, ShowDateLine); break;
                         case "CustomTimeFormat": CustomTimeFormat = v; break;
+                        case "MainTzId": if (v.Length > 0) MainTzId = v; break;
                         case "ShowSecondClock": ShowSecondClock = GetBool(v, ShowSecondClock); break;
                         case "SecondTzId": if (v.Length > 0) SecondTzId = v; break;
                         case "SecondTzLabel": SecondTzLabel = v; break;
@@ -332,6 +335,7 @@ namespace ChinaClock
                 lines.Add("ShowWeekday=" + ShowWeekday);
                 lines.Add("ShowDateLine=" + ShowDateLine);
                 lines.Add("CustomTimeFormat=" + CustomTimeFormat);
+                lines.Add("MainTzId=" + MainTzId);
                 lines.Add("ShowSecondClock=" + ShowSecondClock);
                 lines.Add("SecondTzId=" + SecondTzId);
                 lines.Add("SecondTzLabel=" + SecondTzLabel);
@@ -1302,17 +1306,60 @@ namespace ChinaClock
         private static int Mod(int x, int m) { x %= m; return x < 0 ? x + m : x; }
     }
 
+    // ============================ 主时区 ============================
+
+    // F3：主时区可指定（默认北京时间），任务栏时钟、日历面板、日程提醒全部跟随。
+    // 特殊 Id "Local" = 跟随本机时区；settings.ini 里的 Id 失效（系统升级改名、
+    // 手改错字等）时回退北京时间，绝不抛异常。结果按 Id 缓存，设置变更即切换。
+    internal static class MainClock
+    {
+        public const string LocalMarker = "Local";
+        private static TimeZoneInfo _zone;
+        private static string _requested;
+        private static readonly TimeZoneInfo Fallback = SafeFind("China Standard Time") ?? TimeZoneInfo.Utc;
+
+        public static TimeZoneInfo Zone
+        {
+            get
+            {
+                string id = Settings.MainTzId;
+                if (_zone == null || _requested != id) { _requested = id; _zone = Resolve(id); }
+                return _zone;
+            }
+        }
+
+        // 主时区的当前时间（时钟/面板/提醒统一入口）
+        public static DateTime Now { get { return TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Zone); } }
+
+        private static TimeZoneInfo Resolve(string id)
+        {
+            if (id == LocalMarker) { try { return TimeZoneInfo.Local; } catch { } }
+            return SafeFind(id) ?? Fallback;
+        }
+
+        private static TimeZoneInfo SafeFind(string id)
+        {
+            try { return TimeZoneInfo.FindSystemTimeZoneById(id); }
+            catch { return null; }
+        }
+    }
+
     // ============================ 本机时间 ============================
 
-    // F2：电脑时区不是 UTC+8 时提供本机时间行；相同时区返回 Distinct=false，
-    // 各显示处自动隐藏，避免主时钟与本机行显示两遍同样的时间。
+    // F2：本机时区与主时区不同时提供本机时间行；一致（时区相同或偏移相同）
+    // 返回 Distinct=false，各显示处自动隐藏，避免主时钟与本机行重复显示同样时间。
     internal static class LocalClock
     {
         public static bool Distinct
         {
             get
             {
-                try { return TimeZoneInfo.Local.GetUtcOffset(DateTime.Now).TotalMinutes != 480; }
+                try
+                {
+                    TimeZoneInfo main = MainClock.Zone;
+                    if (string.Equals(main.Id, TimeZoneInfo.Local.Id, StringComparison.OrdinalIgnoreCase)) return false;
+                    return main.GetUtcOffset(DateTime.UtcNow) != TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow);
+                }
                 catch { return false; }
             }
         }
@@ -1418,7 +1465,6 @@ namespace ChinaClock
 
     internal sealed class CalendarPanel : Form
     {
-        private static readonly TimeZoneInfo Tz = TimeZoneInfo.FindSystemTimeZoneById("China Standard Time");
         private static readonly string[] WeekNames = { "一", "二", "三", "四", "五", "六", "日" };
         private static readonly string[] WeekFull = { "星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六" };
 
@@ -1442,7 +1488,7 @@ namespace ChinaClock
         private bool _editOpen;       // 编辑期间面板不因失焦关闭
         private List<AgendaItem> _listItems; // 近期日程列表数据（N2）
         private int _listScroll;             // 列表滚过的行数
-        private bool _hasLocal;              // 头部本机时间（F2，时区≠北京时间才有，画在大时间右侧）
+        private bool _hasLocal;              // 头部本机时间（F2，本机时区≠主时区才有，画在大时间右侧）
         private int _calW;                   // 月历区宽度（卡片开合前的面板宽）
         private int _calX;                   // 月历区在窗内的 x 偏移（详情卡片开在另一侧时 > 0）
         private bool _cardOpen;              // 日期详情卡片（F1，优效日历式侧弹卡）
@@ -1558,7 +1604,7 @@ namespace ChinaClock
 
         private static DateTime Now()
         {
-            return TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Tz);
+            return MainClock.Now; // F3：跟随设置里的主时区
         }
 
         protected override CreateParams CreateParams
@@ -2834,16 +2880,33 @@ namespace ChinaClock
 
     // ============================ 设置窗口 ============================
 
-    // C2：时钟格式 / 第二时区 / 周数 / 主题 / 强调色 / 假日数据 / 日程 / 自启
+    // C2：时钟格式 / 主时区 / 第二时区 / 周数 / 主题 / 强调色 / 假日数据 / 日程 / 自启
     internal sealed class SettingsForm : Form
     {
         private readonly ClockForm _clock;
         private CheckBox _cbSeconds, _cbWeekday, _cbDateLine, _cbLocal, _cbTz2, _cbWeekNum, _cbAutoFetch, _cbAutoStart;
         private TextBox _tbFormat, _tbTzLabel;
-        private ComboBox _cboTz;
+        private ComboBox _cboTz, _cboMainTz;
         private RadioButton _rbFollow, _rbLight, _rbDark;
         private Label _lblFetch;
         private string _accent;
+
+        // F3：主时区候选（北京默认 + 跟随本机 + 常用城市）；第二时区沿用城市表
+        private static readonly SettingsForm.TzItem[] MainTzOptions =
+        {
+            new SettingsForm.TzItem("北京（默认）", "China Standard Time"),
+            new SettingsForm.TzItem("跟随本机", MainClock.LocalMarker),
+            new SettingsForm.TzItem("协调世界时", "UTC"),
+            new SettingsForm.TzItem("伦敦", "GMT Standard Time"),
+            new SettingsForm.TzItem("纽约", "Eastern Standard Time"),
+            new SettingsForm.TzItem("洛杉矶", "Pacific Standard Time"),
+            new SettingsForm.TzItem("东京", "Tokyo Standard Time"),
+            new SettingsForm.TzItem("新加坡", "Singapore Standard Time"),
+            new SettingsForm.TzItem("悉尼", "AUS Eastern Standard Time"),
+            new SettingsForm.TzItem("曼谷", "SE Asia Standard Time"),
+            new SettingsForm.TzItem("迪拜", "Arabian Standard Time"),
+            new SettingsForm.TzItem("莫斯科", "Russia Time Zone 3"),
+        };
 
         private static readonly SettingsForm.TzItem[] TzOptions =
         {
@@ -2863,7 +2926,25 @@ namespace ChinaClock
         {
             public string Label, Id;
             public TzItem(string label, string id) { Label = label; Id = id; }
-            public override string ToString() { return Label + "（" + Id + "）"; }
+            public override string ToString()
+            {
+                string off = OffsetText(Id);
+                return off.Length > 0 ? Label + "（" + off + "）" : Label;
+            }
+        }
+
+        // 当前 UTC 偏移（含夏令时）；"Local"=本机时区，查不到的 Id 回退空串（只显示城市名）
+        private static string OffsetText(string id)
+        {
+            try
+            {
+                TimeZoneInfo z = id == MainClock.LocalMarker ? TimeZoneInfo.Local : TimeZoneInfo.FindSystemTimeZoneById(id);
+                int m = (int)Math.Round(z.GetUtcOffset(DateTime.Now).TotalMinutes);
+                string sign = m == 0 ? "±" : (m < 0 ? "-" : "+");
+                m = Math.Abs(m);
+                return "UTC" + sign + (m % 60 == 0 ? (m / 60).ToString() : (m / 60) + ":" + (m % 60).ToString("00"));
+            }
+            catch { return ""; }
         }
 
         public SettingsForm(ClockForm clock)
@@ -2876,7 +2957,7 @@ namespace ChinaClock
             MinimizeBox = false;
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.Manual;
-            ClientSize = new Size(474, 598);
+            ClientSize = new Size(474, 632);
             BackColor = Color.White;
             Font = new Font("Microsoft YaHei UI", 9F);
             var wa = Screen.PrimaryScreen.WorkingArea;
@@ -2886,7 +2967,7 @@ namespace ChinaClock
             GroupBox g1 = new GroupBox();
             g1.Text = "时钟显示";
             g1.Location = new Point(12, 10);
-            g1.Size = new Size(450, 184);
+            g1.Size = new Size(450, 218);
             _cbSeconds = new CheckBox();
             _cbSeconds.Text = "显示秒"; _cbSeconds.Location = new Point(16, 26); _cbSeconds.AutoSize = true; _cbSeconds.Checked = Settings.ShowSeconds;
             _cbWeekday = new CheckBox();
@@ -2898,23 +2979,29 @@ namespace ChinaClock
             l1.Location = new Point(16, 58); l1.AutoSize = true;
             _tbFormat = new TextBox();
             _tbFormat.Location = new Point(16, 80); _tbFormat.Size = new Size(416, 24); _tbFormat.Text = Settings.CustomTimeFormat;
+            Label lMain = new Label();
+            lMain.Text = "主时区"; lMain.Location = new Point(16, 116); lMain.AutoSize = true;
+            _cboMainTz = new ComboBox();
+            _cboMainTz.Location = new Point(106, 112); _cboMainTz.Size = new Size(326, 24); _cboMainTz.DropDownStyle = ComboBoxStyle.DropDownList;
+            foreach (SettingsForm.TzItem z in MainTzOptions) _cboMainTz.Items.Add(z);
+            _cboMainTz.SelectedIndex = IndexOfId(MainTzOptions, Settings.MainTzId); // 未知 Id 回退选中"北京"
             _cbTz2 = new CheckBox();
-            _cbTz2.Text = "第二时区"; _cbTz2.Location = new Point(16, 114); _cbTz2.AutoSize = true; _cbTz2.Checked = Settings.ShowSecondClock;
+            _cbTz2.Text = "第二时区"; _cbTz2.Location = new Point(16, 150); _cbTz2.AutoSize = true; _cbTz2.Checked = Settings.ShowSecondClock;
             _cboTz = new ComboBox();
-            _cboTz.Location = new Point(106, 110); _cboTz.Size = new Size(206, 24); _cboTz.DropDownStyle = ComboBoxStyle.DropDownList;
+            _cboTz.Location = new Point(106, 146); _cboTz.Size = new Size(206, 24); _cboTz.DropDownStyle = ComboBoxStyle.DropDownList;
             foreach (SettingsForm.TzItem z in TzOptions) _cboTz.Items.Add(z);
-            _cboTz.SelectedIndex = IndexOfTz(Settings.SecondTzId);
+            _cboTz.SelectedIndex = IndexOfId(TzOptions, Settings.SecondTzId);
             _tbTzLabel = new TextBox();
-            _tbTzLabel.Location = new Point(322, 110); _tbTzLabel.Size = new Size(110, 24); _tbTzLabel.Text = Settings.SecondTzLabel;
+            _tbTzLabel.Location = new Point(322, 146); _tbTzLabel.Size = new Size(110, 24); _tbTzLabel.Text = Settings.SecondTzLabel;
             _cbLocal = new CheckBox();
-            _cbLocal.Text = "显示本地时间（电脑时区≠北京时间时，面板顶部与悬停提示显示）"; _cbLocal.Location = new Point(16, 148); _cbLocal.AutoSize = true; _cbLocal.Checked = Settings.ShowLocalClock;
-            g1.Controls.AddRange(new Control[] { _cbSeconds, _cbWeekday, _cbDateLine, l1, _tbFormat, _cbTz2, _cboTz, _tbTzLabel, _cbLocal });
+            _cbLocal.Text = "显示本地时间（本机时区≠主时区时，面板顶部与悬停提示显示；一致时自动隐藏）"; _cbLocal.Location = new Point(16, 184); _cbLocal.AutoSize = true; _cbLocal.Checked = Settings.ShowLocalClock;
+            g1.Controls.AddRange(new Control[] { _cbSeconds, _cbWeekday, _cbDateLine, l1, _tbFormat, lMain, _cboMainTz, _cbTz2, _cboTz, _tbTzLabel, _cbLocal });
             Controls.Add(g1);
 
             // ---- 日历外观 ----
             GroupBox g2 = new GroupBox();
             g2.Text = "日历外观";
-            g2.Location = new Point(12, 202);
+            g2.Location = new Point(12, 236);
             g2.Size = new Size(450, 132);
             _cbWeekNum = new CheckBox();
             _cbWeekNum.Text = "显示周数列"; _cbWeekNum.Location = new Point(16, 26); _cbWeekNum.AutoSize = true; _cbWeekNum.Checked = Settings.ShowWeekNumbers;
@@ -2962,7 +3049,7 @@ namespace ChinaClock
             // ---- 假日与日程数据 ----
             GroupBox g3 = new GroupBox();
             g3.Text = "假日与日程数据";
-            g3.Location = new Point(12, 342);
+            g3.Location = new Point(12, 376);
             g3.Size = new Size(450, 132);
             _cbAutoFetch = new CheckBox();
             _cbAutoFetch.Text = "自动更新法定假日/调休数据（holiday-cn 数据源，每日一次）";
@@ -3014,7 +3101,7 @@ namespace ChinaClock
             // ---- 通用 ----
             GroupBox g4 = new GroupBox();
             g4.Text = "通用";
-            g4.Location = new Point(12, 482);
+            g4.Location = new Point(12, 516);
             g4.Size = new Size(450, 58);
             _cbAutoStart = new CheckBox();
             _cbAutoStart.Text = "开机自启（登录时启动）";
@@ -3026,12 +3113,12 @@ namespace ChinaClock
             Button ok = new Button();
             ok.Text = "保存";
             ok.Size = new Size(88, 30);
-            ok.Location = new Point(286, 552);
+            ok.Location = new Point(286, 586);
             ok.Click += delegate { SaveAndClose(); };
             Button cancel = new Button();
             cancel.Text = "取消";
             cancel.Size = new Size(88, 30);
-            cancel.Location = new Point(382, 552);
+            cancel.Location = new Point(382, 586);
             cancel.Click += delegate { Close(); };
             Controls.Add(ok);
             Controls.Add(cancel);
@@ -3039,11 +3126,11 @@ namespace ChinaClock
             CancelButton = cancel;
         }
 
-        private static int IndexOfTz(string id)
+        private static int IndexOfId(SettingsForm.TzItem[] options, string id)
         {
-            for (int i = 0; i < TzOptions.Length; i++)
-                if (TzOptions[i].Id == id) return i;
-            return 0;
+            for (int i = 0; i < options.Length; i++)
+                if (options[i].Id == id) return i;
+            return 0; // 未知 Id（手改 ini 出错等）回退第一项
         }
 
         private static string FetchStateText()
@@ -3058,6 +3145,8 @@ namespace ChinaClock
             Settings.ShowDateLine = _cbDateLine.Checked;
             Settings.ShowLocalClock = _cbLocal.Checked;
             Settings.CustomTimeFormat = _tbFormat.Text.Trim();
+            SettingsForm.TzItem mainTz = _cboMainTz.SelectedItem as SettingsForm.TzItem;
+            if (mainTz != null) Settings.MainTzId = mainTz.Id;
             Settings.ShowSecondClock = _cbTz2.Checked;
             SettingsForm.TzItem tz = _cboTz.SelectedItem as SettingsForm.TzItem;
             if (tz != null)
@@ -3099,7 +3188,6 @@ namespace ChinaClock
         [StructLayout(LayoutKind.Sequential)]
         private struct RECT { public int Left, Top, Right, Bottom; }
 
-        private static readonly TimeZoneInfo ChinaTz = TimeZoneInfo.FindSystemTimeZoneById("China Standard Time");
         private static readonly string[] Weekdays = { "星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六" };
         // 时钟元素的名字形态随系统版本/语言差异很大，不能锚定开头（internal 供自测回归）：
         //   Win11 / 早期 Win10：“17:22” “19:06:13 星期一”（时间开头）
@@ -3282,7 +3370,7 @@ namespace ChinaClock
             {
                 TogglePanel(); // 日程编辑窗视觉测试入口：面板 + 当天编辑器
                 if (_panel != null)
-                    _panel.OpenAgenda(TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, ChinaTz).Date);
+                    _panel.OpenAgenda(MainClock.Now.Date);
             }
             if (_openListDemo)
             {
@@ -3297,7 +3385,7 @@ namespace ChinaClock
             if (_openDayDetail)
             {
                 TogglePanel(); // 日期详情卡片视觉测试入口（F1）
-                if (_panel != null) _panel.OpenCard(TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, ChinaTz).Date);
+                if (_panel != null) _panel.OpenCard(MainClock.Now.Date);
             }
             CheckReminders(); // 启动即检查一次当天日程（带时间的到点后由 15s 定时器补发）
             SampleBackgroundAsync(); // 首次显示后立刻按"可见状态"重新采底色（不等 15s 定时器）
@@ -3309,7 +3397,7 @@ namespace ChinaClock
         {
             try
             {
-                DateTime now = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, ChinaTz);
+                DateTime now = MainClock.Now; // 提醒按主时区的"今天/到点"判定（F3）
                 DateTime today = now.Date;
                 if (today != _reminderDay) { _reminderDay = today; _fired.Clear(); }
                 List<AgendaItem> items = AgendaStore.On(today);
@@ -3780,7 +3868,7 @@ namespace ChinaClock
 
         private void UpdateTime()
         {
-            DateTime now = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, ChinaTz);
+            DateTime now = MainClock.Now; // F3：任务栏时钟显示主时区时间
             string stamp = now.ToString("yyyyMMddHHmmss");
             if (stamp == _lastStamp) return;
             _lastStamp = stamp;

@@ -1,10 +1,10 @@
 # 中国时间 · 任务栏时钟 + 日历面板 (ChinaTimeWidget)
 
-**A tiny Windows taskbar clock replacement that always shows China Standard Time (UTC+8), with a Chinese lunar calendar flyout** — 农历、节气、节日、干支、法定假日调休、日程备忘与提醒。
+**A tiny Windows taskbar clock replacement that shows China Standard Time (UTC+8) by default, with a configurable timezone and a Chinese lunar calendar flyout** — 农历、节气、节日、干支、法定假日调休、日程备忘与提醒。
 
-把 Windows 11 任务栏右下角的系统时钟替换成**中国标准时间（北京时间 UTC+8）**，点击弹出月历面板，
+把 Windows 11 任务栏右下角的系统时钟替换成**中国标准时间（北京时间 UTC+8）**（主时区可在设置中指定为其他时区），点击弹出月历面板，
 单击日期还可查看**当日详情卡片**（农历/节日/假期/日程/黄历）。
-任务栏停靠在 下/左/顶/右 均自动适配；本机时区≠北京时间时，悬停提示与日历面板顶部自动附显**本地时间**。
+任务栏停靠在 下/左/顶/右 均自动适配；本机时区≠主时区时，悬停提示与日历面板顶部自动附显**本地时间**（一致时自动隐藏防重复）。
 单文件 C# / WinForms，零第三方依赖，**不修改系统时区、不改任何系统设置**，退出程序立即恢复原样。
 
 ## 截图
@@ -24,9 +24,10 @@
 
 ### 任务栏时钟（替代原系统时钟）
 - 时间行格式可配置：秒/星期/日期行显隐，支持自定义 DateTime 格式串
+- **主时区可指定**：默认北京时间，可在设置改为其他时区（含"跟随本机"）；任务栏时钟、日历面板、日程与到点提醒全部跟随，时区数据带夏令时自动换算
 - **任务栏四边适配**：停靠在 下/左/顶/右 自动检测（Win10 原生四边；Win11 需 ExplorerPatcher 等），定位/找钟/底色采样/面板锚点全部跟随
 - **找钟三通道**：Win10 原生/ExplorerPatcher 走 `TrayNotifyWnd→TrayClockWClass` 类名直连（不随系统语言变化）；Win11 XAML 时钟走 UIA（兼容"系统时钟, 17:22, …"等各语言名称形态）；兜底几何估算（Win10 自动预留时钟右侧的操作中心带）。实测失败自动重试，成功后定期刷新，explorer 重启/挪任务栏自动跟上
-- **本地时间**：电脑时区≠北京时间时，悬停时钟提示与日历面板顶部（大时间右侧）自动显示本地时间（可在设置关闭；相同时区自动隐藏防重复；不上任务栏——字号太小看不清）
+- **本地时间**：本机时区≠主时区时，悬停时钟提示与日历面板顶部（大时间右侧）自动显示本地时间（可在设置关闭；与主时区一致——同 Id 或同偏移——自动隐藏防重复；不上任务栏——字号太小看不清）
 - **第二时区双时钟**：时钟下追加一行其他时区（UTC/东京/纽约等，标签可改）
 - **悬停提示**：完整日期 + 农历 + 干支 + 今日节日/节气 + 距最近假期倒计时
 - 背景色自动适配任务栏（深色/浅色主题、Mica 材质采样）；explorer 重启自动对位；点击不抢焦点
@@ -74,7 +75,7 @@
 
 | 文件 | 说明 |
 |---|---|
-| `settings.ini` | 全部设置（时钟格式/第二时区/本地时间/周数/主题/强调色等），由设置窗口维护 |
+| `settings.ini` | 全部设置（时钟格式/主时区 MainTzId/第二时区/本地时间/周数/主题/强调色等），由设置窗口维护 |
 | `holidays.txt` | 手动休/班配置，**优先级最高**：`休 2026-10-01 2026-10-08`、`班 2026-09-27` |
 | `agenda.txt` | 日程：`日期\|内容` / `每年 MM-DD\|内容` / `农历 MM-DD\|内容`，内容开头可带 `HH:mm` |
 | `holidays-cache.txt` | holiday-cn 在线数据缓存（自动维护） |
@@ -94,8 +95,15 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe -nologo -target:winexe ^
 ```
 
 内置 66 项历法/黄历/停靠几何/时钟名匹配自测：`TaskbarChinaClock.exe --selftest`（结果写入 `selftest-result.txt`）。
+另有主时区逻辑反射测试 `tz-logic-test.ps1`（需先把源码编成库：见脚本头注释），校验时区解析/非法 Id 回退/同偏移隐藏本机时间/ini 读写。
 另有无鼠标视觉验证入口：`--show-panel` / `--settings` / `--agenda-demo` / `--list-demo` / `--picker-demo` / `--day-detail`（日期详情卡片），
 以及调试入口 `--pretend-dock:left|top|right`（强制按指定停靠边定位，无需真的挪任务栏）。
+
+### 更新本地部署
+
+「开机自启」注册的是副本 `%LocalAppData%\ChinaClock\TaskbarChinaClock.exe`，直接重新编译仓库里的 exe **不会**让运行中的时钟更新。
+每次编译后运行 `update-deploy.ps1`（右键 → 使用 PowerShell 运行，或 `powershell -ExecutionPolicy Bypass -File update-deploy.ps1`），
+它会自动：校验新 exe → 停掉正在运行的时钟 → 覆盖副本 → 重启。
 
 ## 数据来源与致谢
 
@@ -106,6 +114,7 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe -nologo -target:winexe ^
 
 ## 已知限制
 
+- 主时区改为非北京时区后，农历/节气/黄历/法定假日仍按中国历法随该时区的日期计算（海外时区与北京可能差一天）
 - 系统日历面板（Win+N）、锁屏界面等处的时间无法替换，仍为本地时间
 - 仅覆盖主显示器任务栏；任务栏停靠于 下/左/顶/右 均自动适配（Win11 原生仅支持底部，
   其余停靠需 ExplorerPatcher/StartAllBack 等工具）；`--pretend-dock` 为近似模拟
