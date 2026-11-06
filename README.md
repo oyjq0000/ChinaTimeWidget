@@ -25,6 +25,7 @@
 ### 任务栏时钟（替代原系统时钟）
 - 时间行格式可配置：秒/星期/日期行显隐，支持自定义 DateTime 格式串
 - **任务栏四边适配**：停靠在 下/左/顶/右 自动检测（Win10 原生四边；Win11 需 ExplorerPatcher 等），定位/找钟/底色采样/面板锚点全部跟随
+- **找钟三通道**：Win10 原生/ExplorerPatcher 走 `TrayNotifyWnd→TrayClockWClass` 类名直连（不随系统语言变化）；Win11 XAML 时钟走 UIA（兼容"系统时钟, 17:22, …"等各语言名称形态）；兜底几何估算（Win10 自动预留时钟右侧的操作中心带）。实测失败自动重试，成功后定期刷新，explorer 重启/挪任务栏自动跟上
 - **本地时间**：电脑时区≠北京时间时，悬停时钟提示与日历面板顶部（大时间右侧）自动显示本地时间（可在设置关闭；相同时区自动隐藏防重复；不上任务栏——字号太小看不清）
 - **第二时区双时钟**：时钟下追加一行其他时区（UTC/东京/纽约等，标签可改）
 - **悬停提示**：完整日期 + 农历 + 干支 + 今日节日/节气 + 距最近假期倒计时
@@ -92,7 +93,7 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe -nologo -target:winexe ^
   TaskbarChinaClock.cs
 ```
 
-内置 59 项历法/黄历/停靠几何自测：`TaskbarChinaClock.exe --selftest`（结果写入 `selftest-result.txt`）。
+内置 66 项历法/黄历/停靠几何/时钟名匹配自测：`TaskbarChinaClock.exe --selftest`（结果写入 `selftest-result.txt`）。
 另有无鼠标视觉验证入口：`--show-panel` / `--settings` / `--agenda-demo` / `--list-demo` / `--picker-demo` / `--day-detail`（日期详情卡片），
 以及调试入口 `--pretend-dock:left|top|right`（强制按指定停靠边定位，无需真的挪任务栏）。
 

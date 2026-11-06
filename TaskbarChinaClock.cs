@@ -224,10 +224,22 @@ namespace ChinaClock
             Check(lines, ref fails, "停靠检测 顶部", TaskbarLayout.Detect(Rectangle.FromLTRB(0, 0, 1920, 48), scr) == DockEdge.Top, "");
             Check(lines, ref fails, "停靠检测 左侧", TaskbarLayout.Detect(Rectangle.FromLTRB(0, 0, 58, 1080), scr) == DockEdge.Left, "");
             Check(lines, ref fails, "停靠检测 右侧", TaskbarLayout.Detect(Rectangle.FromLTRB(1862, 0, 1920, 1080), scr) == DockEdge.Right, "");
-            Rectangle gLeft = TaskbarLayout.GuessClockRect(Rectangle.FromLTRB(0, 0, 58, 1080), DockEdge.Left);
+            Rectangle gLeft = TaskbarLayout.GuessClockRect(Rectangle.FromLTRB(0, 0, 58, 1080), DockEdge.Left, false);
             Check(lines, ref fails, "几何估算 左侧=底部锚定", gLeft.Bottom <= 1080 && gLeft.Top > 900 && gLeft.Left >= 0 && gLeft.Right <= 58, gLeft.ToString());
-            Rectangle gTop = TaskbarLayout.GuessClockRect(Rectangle.FromLTRB(0, 0, 1920, 48), DockEdge.Top);
+            Rectangle gTop = TaskbarLayout.GuessClockRect(Rectangle.FromLTRB(0, 0, 1920, 48), DockEdge.Top, false);
             Check(lines, ref fails, "几何估算 顶部=右端+垂直居中", gTop.Right <= 1920 && gTop.Top >= 0 && gTop.Bottom <= 48, gTop.ToString());
+            Rectangle gB11 = TaskbarLayout.GuessClockRect(Rectangle.FromLTRB(0, 1032, 1920, 1080), DockEdge.Bottom, false);
+            Rectangle gB10 = TaskbarLayout.GuessClockRect(Rectangle.FromLTRB(0, 1032, 1920, 1080), DockEdge.Bottom, true);
+            Check(lines, ref fails, "几何估算 Win10 底部预留操作中心带（比 Win11 左移且在栏内）",
+                gB10.Right < gB11.Right && gB10.Right <= 1920 && gB10.Top >= 1032 && gB10.Bottom <= 1080, gB10 + " vs " + gB11);
+
+            // ---- 时钟元素名匹配（Win10 22H2 zh-CN 覆盖右偏的回归用例）----
+            Check(lines, ref fails, "时钟名 时间开头(Win11)", ClockForm.TimeNameRx.IsMatch("17:22"), "");
+            Check(lines, ref fails, "时钟名 时间+星期", ClockForm.TimeNameRx.IsMatch("19:06:13 星期一"), "");
+            Check(lines, ref fails, "时钟名 zh-CN Win10（系统时钟前缀）", ClockForm.TimeNameRx.IsMatch("系统时钟, 17:22, ?2026/?11/?6"), "");
+            Check(lines, ref fails, "时钟名 en-US Win10（System clock 前缀）", ClockForm.TimeNameRx.IsMatch("System clock, 17:22, 11/6/2026"), "");
+            Check(lines, ref fails, "时钟名排除 操作中心通知", !ClockForm.TimeNameRx.IsMatch("操作中心，2 个新通知"), "");
+            Check(lines, ref fails, "时钟名排除 纯日期开头", !ClockForm.TimeNameRx.IsMatch("2026年11月6日"), "");
             Rectangle fLeft = TaskbarLayout.FitTarget(new Rectangle(6, 1000, 46, 60),
                 Rectangle.FromLTRB(0, 0, 58, 1080), DockEdge.Left, 120, 64);
             Check(lines, ref fails, "覆盖定位 左侧=底锚+钳制", fLeft.Bottom <= 1079 && fLeft.Left >= 1, fLeft.ToString());
@@ -1332,6 +1344,14 @@ namespace ChinaClock
         [StructLayout(LayoutKind.Sequential)]
         private struct RECT { public int Left, Top, Right, Bottom; }
 
+        // Win10 原生任务栏（build < 22000）时钟不在任务栏最右端——右侧还有“操作中心”
+        // 按钮（实测 150% DPI 下整体 80 物理像素 = 64 逻辑像素），右端锚定会盖错目标；
+        // Win11 时钟贴右缘，不预留。ExplorerPatcher 的 Win10 式任务栏无此判定也能靠实测纠正。
+        internal static bool Win10StyleTaskbar
+        {
+            get { return Environment.OSVersion.Version.Build < 22000; }
+        }
+
         // 当前任务栏矩形 + 停靠边；找不到任务栏返回 false（dock 回退 Bottom）
         internal static bool Current(out Rectangle tray, out DockEdge dock)
         {
@@ -1356,21 +1376,24 @@ namespace ChinaClock
             return (tray.Top - screen.Top) <= (screen.Bottom - tray.Bottom) ? DockEdge.Top : DockEdge.Bottom;
         }
 
-        // 纯函数：无 UIA 时的系统时钟几何估算。
-        // 水平停靠（顶/底）：右端锚定、垂直居中（公式对顶栏天然成立）；
+        // 纯函数：无实测矩形时的系统时钟几何估算。
+        // 水平停靠（顶/底）：右端锚定、垂直居中（公式对顶栏天然成立）；win10Style=true 时
+        //   先预留时钟右侧的托盘通知带（操作中心按钮），否则整体右偏盖错目标（Win10 实测偏 68px）。
         // 垂直停靠（左/右）：水平居中、底部锚定（系统时钟在侧边栏底部）。
-        public static Rectangle GuessClockRect(Rectangle tray, DockEdge dock)
+        public static Rectangle GuessClockRect(Rectangle tray, DockEdge dock, bool win10Style)
         {
             float k = Math.Min(tray.Width, tray.Height) / 48f;
             int w = (int)(92 * k), h = (int)(42 * k), m = (int)(10 * k);
-            if (dock == DockEdge.Left || dock == DockEdge.Right)
+            bool horizontal = dock == DockEdge.Bottom || dock == DockEdge.Top;
+            int reserve = win10Style && horizontal ? (int)(64 * k) : 0;
+            if (!horizontal)
             {
-                // 窄栏：估算宽度超过栏宽时收窄并钳在栏内（仅兜底初值，UIA 结果稍后精调）
+                // 窄栏：估算宽度超过栏宽时收窄并钳在栏内（仅兜底初值，实测结果稍后精调）
                 int x = tray.Left + (tray.Width - w) / 2;
                 if (w > tray.Width - 4) { w = Math.Max(20, tray.Width - 8); x = tray.Left + 4; }
                 return new Rectangle(x, tray.Bottom - m - h, w, h);
             }
-            return new Rectangle(tray.Right - m - w, tray.Top + (tray.Height - h) / 2, w, h);
+            return new Rectangle(tray.Right - reserve - m - w, tray.Top + (tray.Height - h) / 2, w, h);
         }
 
         // 纯函数：覆盖窗目标位置。水平停靠=右锚+垂直居中（原逻辑，加边钳制）；
@@ -3064,6 +3087,7 @@ namespace ChinaClock
         private const int WINEVENT_OUTOFCONTEXT = 0x0;
 
         [DllImport("user32.dll")] private static extern IntPtr FindWindow(string cls, string title);
+        [DllImport("user32.dll")] private static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string title);
         [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr h, out RECT r);
         [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr h, int after, int x, int y, int cx, int cy, int flags);
         [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hWnd);
@@ -3077,8 +3101,15 @@ namespace ChinaClock
 
         private static readonly TimeZoneInfo ChinaTz = TimeZoneInfo.FindSystemTimeZoneById("China Standard Time");
         private static readonly string[] Weekdays = { "星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六" };
-        // 时钟元素的名字以时间开头（如 “19:06” “19:06:13 星期一”）
-        private static readonly Regex TimeNameRx = new Regex(@"^\s*\d{1,2}:\d{2}", RegexOptions.Compiled);
+        // 时钟元素的名字形态随系统版本/语言差异很大，不能锚定开头（internal 供自测回归）：
+        //   Win11 / 早期 Win10：“17:22” “19:06:13 星期一”（时间开头）
+        //   Win10 22H2 zh-CN：“系统时钟, 17:22, ?2026/?11/?6”（带本地化“系统时钟”前缀，
+        //     实测正是此前 UIA 匹配失败、永远退回几何兜底导致覆盖右偏的根源）
+        //   Win10 en-US：“System clock, 17:22, 11/6/2026”
+        // 故允许可选“系统时钟/System clock”标签和分隔符后接时间；纯日期/通知文本不匹配
+        internal static readonly Regex TimeNameRx = new Regex(
+            @"^\s*(?:system\s+clock|系统时钟)?\s*[,,;；]?\s*\d{1,2}:\d{2}",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
         // 日期行沿用系统短日期格式（与原时钟显示格式一致）
         private readonly string _datePattern = CultureInfo.CurrentCulture.DateTimeFormat.ShortDatePattern;
@@ -3155,7 +3186,11 @@ namespace ChinaClock
             _uiTimer.Interval = 200;
             _uiTimer.Tick += delegate { UpdateTime(); };
             _fitTimer.Interval = 4000;
-            _fitTimer.Tick += delegate { FitToNativeClock(Rectangle.Empty); };
+            _fitTimer.Tick += delegate
+            {
+                FitToNativeClock(Rectangle.Empty);
+                if (!TaskbarLayout.PretendDock.HasValue) ReprobeAsync(false); // 失败自动重试/定期刷新
+            };
             _bgTimer.Interval = 15000;
             _bgTimer.Tick += delegate { SampleBackgroundAsync(); MaybeDailyFetch(); CheckReminders(); };
         }
@@ -3177,8 +3212,9 @@ namespace ChinaClock
         protected override void OnLoad(EventArgs e)
         {
             base.OnLoad(e);
-            // 先按几何估算立即定位显示；UIA 精确结果稍后在后台线程补一次微调
-            FitToNativeClock(GeometricGuess());
+            // 先按几何估算立即定位显示（Empty 不入库，仅兜底展示）；实测矩形稍后在
+            // 后台线程补一次微调，失败时 fitTimer 周期重试，成功后每 5 分钟刷新
+            FitToNativeClock(Rectangle.Empty);
             _uiTimer.Start();
             _fitTimer.Start();
             _bgTimer.Start();
@@ -3186,13 +3222,8 @@ namespace ChinaClock
             HolidayFeed.LoadCache(); // 离线先用缓存
             MaybeDailyFetch();
 
-            if (!TaskbarLayout.PretendDock.HasValue) // 调试模式（--pretend-dock）跳过 UIA，纯几何验证
-                System.Threading.ThreadPool.QueueUserWorkItem(delegate
-                {
-                    Rectangle r = TryUiaRect();
-                    if (r.IsEmpty || !IsHandleCreated) return;
-                    BeginInvoke((MethodInvoker)delegate { FitToNativeClock(r); });
-                });
+            if (!TaskbarLayout.PretendDock.HasValue) // 调试模式（--pretend-dock）跳过实测，纯几何验证
+                ReprobeAsync(true);
 
             // 点击任务栏时 Windows 会把任务栏窗口顶到置顶层最前，盖住本时钟（原生时钟
             // 露出，要等定位定时器 4 秒后才能顶回来）。挂系统事件钩子，前台切换或任务
@@ -3430,7 +3461,59 @@ namespace ChinaClock
             _dock = TaskbarLayout.PretendDock ?? TaskbarLayout.Detect(_trayRect, Screen.PrimaryScreen.Bounds);
         }
 
-        // 仅在后台线程调用：用 UI Automation 在任务栏里找时钟元素（名字以 HH:mm 开头、位于托盘区）。
+        // 仅在 UI 线程调用：后台线程实测系统时钟矩形（Win32 类名路径优先，UIA 兜底）。
+        // 旧版只在启动时探测一次，失败（如 UIA 阻塞超时、时钟名不认识）就永远停在
+        // 几何兜底上——Win10 zh-CN 下兜底整体右偏、原生钟半截外露，因此这里：
+        //   未实测到矩形时每 4 秒重试；实测到后每 5 分钟刷新一次（随日期文字变宽、
+        //   explorer 重启、用户挪任务栏等自动跟上）。force=true 忽略节流立即探测。
+        //   上一轮还没返回（UIA 阻塞）就不再排队，防止线程池堆积。
+        private DateTime _lastProbeAt = DateTime.MinValue;
+        private int _probeInFlight;
+
+        private void ReprobeAsync(bool force)
+        {
+            DateTime now = DateTime.UtcNow;
+            if (!force && (now - _lastProbeAt).TotalSeconds < (_nativeRect.IsEmpty ? 4 : 300)) return;
+            if (System.Threading.Interlocked.CompareExchange(ref _probeInFlight, 1, 0) != 0) return;
+            _lastProbeAt = now;
+            System.Threading.ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    Rectangle r = TryWin32ClockRect();
+                    if (r.IsEmpty) r = TryUiaRect();
+                    if (!r.IsEmpty && IsHandleCreated)
+                        BeginInvoke((MethodInvoker)delegate { FitToNativeClock(r); });
+                }
+                finally { System.Threading.Interlocked.Exchange(ref _probeInFlight, 0); }
+            });
+        }
+
+        // 仅在后台线程调用：Win10 原生任务栏的经典定位——Shell_TrayWnd → TrayNotifyWnd →
+        // TrayClockWClass。窗口类名不随语言/主题变化，比 UIA 又快又稳（实测 Win10 22H2 zh-CN、
+        // DPI 150% 命中且矩形与 UIA 完全一致）；Win11 无 TrayClockWClass（时钟是 XAML 元素），
+        // 返回空、由 UIA 接手。ExplorerPatcher 装的 Win10 式任务栏同样有该类，也能命中。
+        private Rectangle TryWin32ClockRect()
+        {
+            try
+            {
+                IntPtr tray = FindWindow("Shell_TrayWnd", null);
+                if (tray == IntPtr.Zero) return Rectangle.Empty;
+                IntPtr notify = FindWindowEx(tray, IntPtr.Zero, "TrayNotifyWnd", null);
+                if (notify == IntPtr.Zero) return Rectangle.Empty;
+                IntPtr clock = FindWindowEx(notify, IntPtr.Zero, "TrayClockWClass", null);
+                if (clock == IntPtr.Zero) return Rectangle.Empty;
+                RECT cr;
+                if (!GetWindowRect(clock, out cr)) return Rectangle.Empty;
+                Rectangle r = Rectangle.FromLTRB(cr.Left, cr.Top, cr.Right, cr.Bottom);
+                if (r.Width <= 0 || r.Height <= 0) return Rectangle.Empty;
+                return r;
+            }
+            catch { return Rectangle.Empty; }
+        }
+
+        // 仅在后台线程调用：用 UI Automation 在任务栏里找时钟元素（名字为时间形态、位于托盘区，
+        // 匹配规则见 TimeNameRx——Win10 22H2 zh-CN 的名字带“系统时钟”前缀，不以时间开头）。
         // F1：过滤条件按停靠轴向泛化——水平停靠时钟贴任务栏右端，垂直停靠时钟贴底端。
         // 注意：explorer 偶尔会让 UIA 调用长时间阻塞，绝不能在 UI 线程上执行；
         // 阻塞只会卡住这个后台线程，不影响小程序正常显示。
@@ -3490,11 +3573,11 @@ namespace ChinaClock
             catch { return Rectangle.Empty; }
         }
 
-        // UIA 不可用时的兜底：按任务栏几何位置估算时钟区域（F1：按停靠边分派）
+        // 实测（Win32/UIA）不可用时的兜底：按任务栏几何位置估算时钟区域（F1：按停靠边分派）
         private Rectangle GeometricGuess()
         {
             if (_trayRect.IsEmpty) return Rectangle.Empty;
-            return TaskbarLayout.GuessClockRect(_trayRect, _dock);
+            return TaskbarLayout.GuessClockRect(_trayRect, _dock, TaskbarLayout.Win10StyleTaskbar);
         }
 
         // ---- 外观 ----
@@ -3869,7 +3952,7 @@ namespace ChinaClock
             };
 
             var miFit = new ToolStripMenuItem("重新校准位置");
-            miFit.Click += delegate { FitToNativeClock(Rectangle.Empty); };
+            miFit.Click += delegate { FitToNativeClock(Rectangle.Empty); ReprobeAsync(true); };
 
             var miExit = new ToolStripMenuItem("退出（恢复系统时钟）");
             miExit.Click += delegate { Close(); };
