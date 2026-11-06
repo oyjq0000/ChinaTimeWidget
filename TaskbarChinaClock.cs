@@ -239,6 +239,7 @@ namespace ChinaClock
             Check(lines, ref fails, "时钟名 时间+星期", ClockForm.TimeNameRx.IsMatch("19:06:13 星期一"), "");
             Check(lines, ref fails, "时钟名 zh-CN Win10（系统时钟前缀）", ClockForm.TimeNameRx.IsMatch("系统时钟, 17:22, ?2026/?11/?6"), "");
             Check(lines, ref fails, "时钟名 en-US Win10（System clock 前缀）", ClockForm.TimeNameRx.IsMatch("System clock, 17:22, 11/6/2026"), "");
+            Check(lines, ref fails, "时钟名 en-US Win11（Clock 前缀）", ClockForm.TimeNameRx.IsMatch("Clock 4:18 AM\n11/6/2026"), "");
             Check(lines, ref fails, "时钟名排除 操作中心通知", !ClockForm.TimeNameRx.IsMatch("操作中心，2 个新通知"), "");
             Check(lines, ref fails, "时钟名排除 纯日期开头", !ClockForm.TimeNameRx.IsMatch("2026年11月6日"), "");
             Rectangle fLeft = TaskbarLayout.FitTarget(new Rectangle(6, 1000, 46, 60),
@@ -1394,9 +1395,26 @@ namespace ChinaClock
         // Win10 原生任务栏（build < 22000）时钟不在任务栏最右端——右侧还有“操作中心”
         // 按钮（实测 150% DPI 下整体 80 物理像素 = 64 逻辑像素），右端锚定会盖错目标；
         // Win11 时钟贴右缘，不预留。ExplorerPatcher 的 Win10 式任务栏无此判定也能靠实测纠正。
-        internal static bool Win10StyleTaskbar
+        // 注意不能直接用 Environment.OSVersion：csc 编译的 exe 无 supportedOS 清单时
+        // 兼容性垫片会谎报为 6.2.9200（build 9200），Win11 也被误判成 Win10、错误预留
+        // 64px 导致覆盖右移露原生钟（实测 Win11 26200 en-US 必现）——改读注册表真实版本。
+        private static readonly bool Win10Style = DetectWin10StyleTaskbar();
+        internal static bool Win10StyleTaskbar { get { return Win10Style; } }
+
+        private static bool DetectWin10StyleTaskbar()
         {
-            get { return Environment.OSVersion.Version.Build < 22000; }
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(
+                    @"SOFTWARE\Microsoft\Windows NT\CurrentVersion"))
+                {
+                    object v = k != null ? k.GetValue("CurrentBuildNumber") : null;
+                    int build;
+                    if (v != null && int.TryParse(v.ToString(), out build)) return build < 22000;
+                }
+            }
+            catch { }
+            return Environment.OSVersion.Version.Build < 22000; // 注册表读不到再退回（可能被垫片谎报）
         }
 
         // 当前任务栏矩形 + 停靠边；找不到任务栏返回 false（dock 回退 Bottom）
@@ -3190,13 +3208,14 @@ namespace ChinaClock
 
         private static readonly string[] Weekdays = { "星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六" };
         // 时钟元素的名字形态随系统版本/语言差异很大，不能锚定开头（internal 供自测回归）：
-        //   Win11 / 早期 Win10：“17:22” “19:06:13 星期一”（时间开头）
+        //   Win11 zh-CN / 早期 Win10：“17:22” “19:06:13 星期一”（时间开头）
+        //   Win11 en-US：“Clock 4:18 AM / 11/6/2026”（带本地化“Clock”前缀，实测 26200 en-US）
         //   Win10 22H2 zh-CN：“系统时钟, 17:22, ?2026/?11/?6”（带本地化“系统时钟”前缀，
         //     实测正是此前 UIA 匹配失败、永远退回几何兜底导致覆盖右偏的根源）
         //   Win10 en-US：“System clock, 17:22, 11/6/2026”
-        // 故允许可选“系统时钟/System clock”标签和分隔符后接时间；纯日期/通知文本不匹配
+        // 故允许可选“Clock/System clock/系统时钟”标签和分隔符后接时间；纯日期/通知文本不匹配
         internal static readonly Regex TimeNameRx = new Regex(
-            @"^\s*(?:system\s+clock|系统时钟)?\s*[,,;；]?\s*\d{1,2}:\d{2}",
+            @"^\s*(?:(?:system\s+)?clock|系统时钟)?\s*[,,;；]?\s*\d{1,2}:\d{2}",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
         // 日期行沿用系统短日期格式（与原时钟显示格式一致）
